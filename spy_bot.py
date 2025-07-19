@@ -22,7 +22,47 @@ logger = logging.getLogger(__name__)
 # Game state
 # Structure: {chat_id: {players: {user_id: name}, state: 'waiting'/'started', location: str, spy: user_id, votes: {user_id: voted_id}, timers: [], update, context}}
 games = {}
-locations = ["Beach", "Hospital", "Airport", "School", "Library", "Cinema", "Restaurant", "Museum", "Zoo"]
+locations = [
+    # 🌆 City Locations
+    "Bank", "Train Station", "Police Station", "Fire Station", "Shopping Mall", "Parking Garage", "Post Office", "Apartment Complex",
+    "Metro Station", "Taxi Stand", "Highway Toll Booth", "Train Compartment", "Dockyard",
+
+    # 🏫 Educational & Institutional
+    "University", "Kindergarten", "Science Lab", "Art Studio", "Debate Hall",
+
+    # 🏥 Medical / Health
+    "Hospital", "Dentist Office", "Pharmacy", "Veterinary Clinic", "Psychiatric Hospital",
+
+    # 🛫 Travel & Transit
+    "Airport", "Space Station", "Cruise Ship", "Border Checkpoint", "Ferry Terminal", "Airplane",
+
+    # 🏠 Indoor Settings
+    "Elevator", "Basement", "Attic", "Rooftop Garden", "Garage Workshop",
+
+    # 🍕 Food & Entertainment
+    "Cinema", "Ice Cream Shop", "Nightclub", "Game Arcade", "Buffet Restaurant", "Food Truck", "Karaoke Bar", "Bowling Alley", "Escape Room", "Laser Tag Arena", "VR Arcade", "Theme Park",
+
+    # 🌳 Outdoor & Nature
+    "Beach", "Forest Camp", "Waterfall", "Hiking Trail", "Farm", "Desert Camp", "Jungle Safari",
+
+    # 🏰 Fictional / Fun
+    "Wizard School", "Supervillain Lair", "Zombie Apocalypse Shelter", "Pirate Ship", "Alien Planet",
+
+    # ⚔️ Historical
+    "Roman Colosseum", "Medieval Castle", "Ancient Pyramid", "World War Bunker", "Samurai Dojo",
+
+    # ⛪ Religious / Cultural
+    "Church", "Mosque", "Temple", "Cemetery", "Wedding Hall",
+
+    # 🏢 Office & Workplaces
+    "Startup Office", "Call Center", "Recording Studio", "Newsroom", "Conference Room",
+
+    # 🧪 Scientific / Military
+    "Nuclear Reactor", "Control Room", "Space Research Center", "Submarine", "Secret Lab",
+
+    # 🏫 Others
+    "Library", "Restaurant", "School", "Museum", "Zoo"
+]
 
 # --- Command Handlers ---
 def start(update: Update, context: CallbackContext):
@@ -64,7 +104,52 @@ def guide(update: Update, context: CallbackContext):
     )
 
 def intel(update: Update, context: CallbackContext):
-    update.message.reply_text("\U0001F4DC *Rules:*\n- One spy, others are civilians\n- Civilians know a location\n- Spy pretends and guesses\n- Vote to catch the spy!", parse_mode='Markdown')
+    update.message.reply_text(
+        """📖 *INTEL — Deep Briefing for Agents*
+
+🕵️‍♂️ *Game Overview:*
+- 1 player is randomly chosen as the *Spy*.
+- All others are *Civilians* and get the *same secret location*.
+- The spy gets *no location* and must figure it out based on discussion.
+
+---
+
+🎯 *Objectives:*
+- *Civilians:* Work together and vote out the spy without revealing the location.
+- *Spy:* Pretend to know the location. If you survive the vote, guess the location to win!
+
+---
+
+⏱️ *Game Phases:*
+1. **Join Phase:** Players use `/join` to enter the game.
+2. **Start Game:** Host uses `/begin` to assign roles and start the timer.
+3. **Discussion (5 minutes):** Talk in group, ask questions, act casual.
+4. **Voting (1 minute):** Use `/vote` to choose who you think is the spy.
+5. **Spy Guess (30 sec):** If spy survives, they try guessing the location.
+
+---
+
+👥 *Commands:*
+- `/newgame` – Create a new game
+- `/join` – Join the current game
+- `/begin` – Officially start the game
+- `/location` – Get your secret location (privately)
+- `/vote` – Vote who you suspect
+- `/endgame` – End the current game manually
+- `/players` – List of joined players
+- `/guide` – Quick gameplay instructions
+- `/intel` – You're here 😉
+
+---
+
+💡 *Pro Tips:*
+- Civilians: Don’t be too obvious about the location.
+- Spy: Ask vague but smart questions.
+- Everyone: Keep the conversation going. Silence is suspicious!
+
+Good luck, Agent. Your mission starts soon. 🎩""",
+        parse_mode='Markdown'
+    )
 
 def newgame(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
@@ -162,7 +247,7 @@ def location_command(update: Update, context: CallbackContext):
         update.message.reply_text("❌ Game hasn’t started yet.")
         return
     
-     # Always send public confirmation message
+    # Always send public confirmation message
     update.message.reply_text("📬 Location information has been sent to you privately.")
 
     if user_id == game['spy']:
@@ -178,19 +263,29 @@ def vote(update: Update, context: CallbackContext):
     if not game or game['state'] != 'started':
         update.message.reply_text("❌ No active game.")
         return
-
+    
+    game['votes'] = {}  # Reset votes
     keyboard = [
         [InlineKeyboardButton(name, callback_data=f"vote:{uid}")]
         for uid, name in game['players'].items()
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("🗳 *Who do you think is the spy?*", reply_markup=reply_markup, parse_mode='Markdown')
+    update.message.reply_text("🗳 *Who do you think is the spy?*" \
+_Vote by tapping on a name below._", reply_markup=reply_markup, parse_mode='Markdown')
 
     def timeout_vote():
         context.bot.send_message(chat_id, "⏰ Voting time is up!")
         finish_vote(chat_id, context)
 
     Timer(60, timeout_vote).start()
+
+    def vote_progress():
+        if chat_id in games:
+            current = len(games[chat_id]['votes'])
+            total = len(games[chat_id]['players'])
+            if current < total:
+                context.bot.send_message(chat_id, f"📥 {current}/{total} votes submitted...")
+    Timer(30, vote_progress).start()
 
 def vote_callback(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -216,15 +311,49 @@ def finish_vote(chat_id, context):
 
     votes = game['votes']
     counts = {}
-    for v in votes.values():
-        counts[v] = counts.get(v, 0) + 1
-    max_voted = max(counts, key=counts.get)
-    name = game['players'].get(max_voted, "Unknown")
+    for voter, voted in votes.items():
+        counts[voted] = counts.get(voted, 0) + 1
 
-    if max_voted == game['spy']:
-        msg = f"✅ {name} was the spy and was caught! Civilians win!"
+    # Prepare vote breakdown
+    breakdown = "🗳️ *Voting Result:*
+"
+    for voter_id, voted_id in votes.items():
+        voter_name = game['players'].get(voter_id, 'Unknown')
+        voted_name = game['players'].get(voted_id, 'Unknown')
+        breakdown += f"- {voter_name} voted for {voted_name}
+"
+
+    # Detect highest voted
+    max_votes = max(counts.values())
+    top_voted = [uid for uid, c in counts.items() if c == max_votes]
+
+    # Tie case
+    if len(top_voted) > 1:
+        chosen = random.choice(top_voted)
+        tie_msg = "⚠️ There was a tie! Randomly selecting one among them..."
+        context.bot.send_message(chat_id, tie_msg)
+    else:
+        chosen = top_voted[0]
+
+    name = game['players'].get(chosen, 'Unknown')
+    context.bot.send_message(chat_id, breakdown, parse_mode='Markdown')
+
+    if chosen == game['spy']:
+        msg = f"✅ {name} was the spy and was caught! Civilians win! 🎉"
         context.bot.send_message(chat_id=chat_id, text=msg)
         del games[chat_id]
+    else:
+        msg = f"❌ {name} was innocent. The spy was {game['players'].get(game['spy'], 'Unknown')}. Spy wins!"
+        context.bot.send_message(chat_id=chat_id, text=msg)
+        spy = game['spy']
+        context.bot.send_message(spy, "🕵️ You've survived… now guess the location! You have 30 seconds. Reply with your guess.")
+
+        def timeout_guess():
+            context.bot.send_message(chat_id, "⏰ Spy failed to guess in time. Civilians win!")
+            del games[chat_id]
+
+        Timer(30, timeout_guess).start()
+        game['awaiting_guess'] = True
     else:
         msg = f"❌ {name} was innocent. The spy was {game['players'].get(game['spy'], 'Unknown')}. Spy wins!"
         context.bot.send_message(chat_id=chat_id, text=msg)
@@ -288,3 +417,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
