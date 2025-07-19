@@ -3,6 +3,9 @@ import os
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
+
+if not TOKEN:
+    raise ValueError("BOT_TOKEN is missing. Please set it in environment.")
 import logging
 import random
 from telegram import Update
