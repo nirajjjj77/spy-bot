@@ -25,12 +25,42 @@ locations = ["Beach", "Hospital", "Airport", "School", "Library", "Cinema", "Res
 
 # --- Command Handlers ---
 def start(update: Update, context: CallbackContext):
-    update.message.reply_text("\U0001F575\uFE0F *Welcome to AgentAmongUs!*\nUse /help to know how to play.", parse_mode='Markdown')
+    update.message.reply_text(
+        """🕵️‍♂️ *Welcome, Agent!*  
+    You've entered the world of *deception, deduction, and danger!* 🔍💣
 
-def help_command(update: Update, context: CallbackContext):
-    update.message.reply_text("\U0001F3AE *How to Play:*\n1 spy among civilians.\nCivilians get same location.\nSpy doesn’t.\nDiscuss and /vote to find the spy!\n/start to begin, /join to enter, /begin to start the game.", parse_mode='Markdown')
+    🎯 *Goal:* Blend in, lie smart, and expose the SPY (or hide if you are one 😏).
 
-def rules(update: Update, context: CallbackContext):
+    🎮 Use /guide to learn the rules or /newgame to create a new mission!""",
+        parse_mode='Markdown'
+    )
+
+def guide(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        """🎮 *How to Play:*
+
+    🕵️ There is *1 spy* and multiple civilians.
+    📍 Civilians are told the same location.
+    ❌ The spy does *not* know the location.
+
+    💬 Discuss among yourselves.
+    🗳️ Use /vote to identify the spy.
+    🎯 Catch the spy before time runs out!
+
+    *Commands:*
+    /newgame – Start a new game session.
+    /join – Join the ongoing game.
+    /players – Show current participants.
+    /begin – Begin the mission (minimum 3 players).
+    /location – Civilians can check their secret location.
+    /vote – Vote to find the spy.
+    /endgame – Abort the current game.
+
+    _Use /start if you're new or want the intro again._""",
+        parse_mode='Markdown'
+    )
+
+def intel(update: Update, context: CallbackContext):
     update.message.reply_text("\U0001F4DC *Rules:*\n- One spy, others are civilians\n- Civilians know a location\n- Spy pretends and guesses\n- Vote to catch the spy!", parse_mode='Markdown')
 
 def newgame(update: Update, context: CallbackContext):
@@ -116,7 +146,8 @@ def location_command(update: Update, context: CallbackContext):
     if user_id == game['spy']:
         update.message.reply_text("🤫 You're the spy. No location for you.")
     elif user_id in game['players']:
-        update.message.reply_text(f"📍 Location: {game['location']}")
+        context.bot.send_message(chat_id=user_id, text=f"📍 Location: *{game['location']}*", parse_mode='Markdown')
+        update.message.reply_text("📬 Location sent to you privately.")
     else:
         update.message.reply_text("⚠️ You’re not in the game.")
 
@@ -177,8 +208,8 @@ def main():
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("rules", rules))
+    dp.add_handler(CommandHandler("guide", guide))
+    dp.add_handler(CommandHandler("intel", intel))
     dp.add_handler(CommandHandler("newgame", newgame))
     dp.add_handler(CommandHandler("join", join))
     dp.add_handler(CommandHandler("leave", leave))
