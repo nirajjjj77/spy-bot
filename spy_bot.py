@@ -6,7 +6,6 @@ TOKEN = os.getenv("BOT_TOKEN")
 import logging
 import random
 from telegram import Update
-from telegram.constants import ParseMode
 from telegram.ext import Updater, CommandHandler, CallbackContext
 
 # Enable logging
@@ -97,7 +96,7 @@ def begin(update: Update, context: CallbackContext):
         if user_id == spy:
             context.bot.send_message(chat_id=user_id, text="🕵️ You are the SPY! Try to guess the location.")
         else:
-            context.bot.send_message(chat_id=user_id, text=f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode=ParseMode.MARKDOWN)
+            context.bot.send_message(chat_id=user_id, text=f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
 
     update.message.reply_text("🎮 Game started! Discuss in group and then use /vote")
 
