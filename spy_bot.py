@@ -68,6 +68,9 @@ def intel(update: Update, context: CallbackContext):
 
 def newgame(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
+    if chat_id in games:
+        update.message.reply_text("⚠️ A game is already in progress. Use /endgame to end it before starting a new one.")
+        return
     games[chat_id] = {'players': {}, 'state': 'waiting', 'location': None, 'spy': None, 'votes': {}, 'timers': []}
     update.message.reply_text("🆕 *New game created!*\nPlayers, use /join to participate.", parse_mode='Markdown')
 
@@ -105,6 +108,9 @@ def players(update: Update, context: CallbackContext):
     game = games.get(chat_id)
     if not game:
         update.message.reply_text("❌ No game in progress.")
+        return
+    if not game['players']:
+        update.message.reply_text("👥 No players have joined yet.")
         return
     names = list(game['players'].values())
     update.message.reply_text("👥 *Players:*\n" + "\n".join(names), parse_mode='Markdown')
@@ -155,12 +161,14 @@ def location_command(update: Update, context: CallbackContext):
     if not game or game['state'] != 'started':
         update.message.reply_text("❌ Game hasn’t started yet.")
         return
+    
+     # Always send public confirmation message
+    update.message.reply_text("📬 Location information has been sent to you privately.")
 
     if user_id == game['spy']:
-        update.message.reply_text("🤫 You're the spy. No location for you.")
+        context.bot.send_message(chat_id=user_id, text="🤫 You are the SPY. No location for you.")
     elif user_id in game['players']:
         context.bot.send_message(chat_id=user_id, text=f"📍 Location: *{game['location']}*", parse_mode='Markdown')
-        update.message.reply_text("📬 Location sent to you privately.")
     else:
         update.message.reply_text("⚠️ You’re not in the game.")
 
@@ -273,7 +281,7 @@ def main():
     dp.add_handler(CommandHandler("vote", vote))
     dp.add_handler(CommandHandler("endgame", endgame))
     dp.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^vote:"))
-    dp.add_handler(MessageHandler(Filters.text & Filters.group, handle_guess))
+    dp.add_handler(MessageHandler(Filters.text, handle_guess))
 
     updater.start_polling()
     updater.idle()
