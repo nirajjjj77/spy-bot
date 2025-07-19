@@ -68,11 +68,11 @@ locations = [
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
         """🕵️‍♂️ *Welcome, Agent!*  
-    You've entered the world of *deception, deduction, and danger!* 🔍💣
+You've entered the world of *deception, deduction, and danger!* 🔍💣
 
-    🎯 *Goal:* Blend in, lie smart, and expose the SPY (or hide if you are one 😏).
+🎯 *Goal:* Blend in, lie smart, and expose the SPY (or hide if you are one 😏).
 
-    🎮 Use /guide to learn the rules or /newgame to create a new mission!""",
+🎮 Use /guide to learn the rules or /newgame to create a new mission!""",
         parse_mode='Markdown'
     )
 
@@ -80,26 +80,26 @@ def guide(update: Update, context: CallbackContext):
     update.message.reply_text(
         """🎮 *How to Play:*
 
-    🕵️ There is *1 spy* and multiple civilians.
-    📍 Civilians are told the same location.
-    ❌ The spy does *not* know the location.
+🕵️ There is *1 spy* and multiple civilians.
+📍 Civilians are told the same location.
+❌ The spy does *not* know the location.
 
-    💬 Discuss among yourselves.
-    🗳️ Use /vote to identify the spy.
-    🎯 Catch the spy before time runs out!
+💬 Discuss among yourselves.
+🗳️ Use /vote to identify the spy.
+🎯 Catch the spy before time runs out!
 
-    *Commands:*
-    /newgame – Start a new game session.
-    /join – Join the ongoing game.
-    /leave – Leave the current game.
-    /players – Show current participants.
-    /begin – Begin the mission (minimum 3 players).
-    /location – Civilians can check their secret location.
-    /vote – Vote who you think is the spy.
-    /endgame – End the current game.
-    /intel - Read the detailed game rules.
+*Commands:*
+/newgame – Start a new game session.
+/join – Join the ongoing game.
+/leave – Leave the current game.
+/players – Show current participants.
+/begin – Begin the mission (minimum 3 players).
+/location – Civilians can check their secret location.
+/vote – Vote who you think is the spy.
+/endgame – End the current game.
+/intel - Read the detailed game rules.
 
-    _Use /start if you're new or want the intro again._""",
+_Use /start if you're new or want the intro again._""",
         parse_mode='Markdown'
     )
 
@@ -270,8 +270,11 @@ def vote(update: Update, context: CallbackContext):
         for uid, name in game['players'].items()
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("🗳 *Who do you think is the spy?*" \
-_Vote by tapping on a name below._", reply_markup=reply_markup, parse_mode='Markdown')
+    update.message.reply_text(
+        "🗳 *Who do you think is the spy?*\nVote by tapping on a name below.", 
+        reply_markup=reply_markup, 
+        parse_mode='Markdown'
+    )
 
     def timeout_vote():
         context.bot.send_message(chat_id, "⏰ Voting time is up!")
@@ -315,13 +318,11 @@ def finish_vote(chat_id, context):
         counts[voted] = counts.get(voted, 0) + 1
 
     # Prepare vote breakdown
-    breakdown = "🗳️ *Voting Result:*
-"
+    breakdown = "🗳️ *Voting Result:*/n"
     for voter_id, voted_id in votes.items():
         voter_name = game['players'].get(voter_id, 'Unknown')
         voted_name = game['players'].get(voted_id, 'Unknown')
-        breakdown += f"- {voter_name} voted for {voted_name}
-"
+        breakdown += f"- {voter_name} voted for {voted_name}\n"
 
     # Detect highest voted
     max_votes = max(counts.values())
@@ -350,19 +351,8 @@ def finish_vote(chat_id, context):
 
         def timeout_guess():
             context.bot.send_message(chat_id, "⏰ Spy failed to guess in time. Civilians win!")
-            del games[chat_id]
-
-        Timer(30, timeout_guess).start()
-        game['awaiting_guess'] = True
-    else:
-        msg = f"❌ {name} was innocent. The spy was {game['players'].get(game['spy'], 'Unknown')}. Spy wins!"
-        context.bot.send_message(chat_id=chat_id, text=msg)
-        spy = game['spy']
-        context.bot.send_message(spy, "🕵️ You've survived… now guess the location! You have 30 seconds. Reply with your guess.")
-
-        def timeout_guess():
-            context.bot.send_message(chat_id, "⏰ Spy failed to guess in time. Civilians win!")
-            del games[chat_id]
+            if chat_id in games:
+                del games[chat_id]
 
         Timer(30, timeout_guess).start()
         game['awaiting_guess'] = True
@@ -388,6 +378,10 @@ def handle_guess(update: Update, context: CallbackContext):
 def endgame(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
     if chat_id in games:
+        #cancel any active timers
+        game = games[chat_id]
+        for timer in game.get('timers', []):
+            timer.cancel()
         del games[chat_id]
         update.message.reply_text("🛑 Game ended.")
     else:
