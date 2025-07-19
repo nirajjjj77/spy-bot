@@ -5,8 +5,9 @@ from dotenv import load_dotenv
 import os
 import logging
 import random
+from threading import Timer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackContext, CallbackQueryHandler
+from telegram.ext import Updater, CommandHandler, CallbackContext, CallbackQueryHandler, MessageHandler, Filters
 
 # Load environment
 load_dotenv()
@@ -19,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Game state
-# Structure: {chat_id: {players: {user_id: name}, state: 'waiting'/'started', location: str, spy: user_id, votes: {user_id: voted_id}}}
+# Structure: {chat_id: {players: {user_id: name}, state: 'waiting'/'started', location: str, spy: user_id, votes: {user_id: voted_id}, timers: [], update, context}}
 games = {}
 locations = ["Beach", "Hospital", "Airport", "School", "Library", "Cinema", "Restaurant", "Museum", "Zoo"]
 
@@ -50,11 +51,13 @@ def guide(update: Update, context: CallbackContext):
     *Commands:*
     /newgame – Start a new game session.
     /join – Join the ongoing game.
+    /leave – Leave the current game.
     /players – Show current participants.
     /begin – Begin the mission (minimum 3 players).
     /location – Civilians can check their secret location.
-    /vote – Vote to find the spy.
-    /endgame – Abort the current game.
+    /vote – Vote who you think is the spy.
+    /endgame – End the current game.
+    /intel - Read the detailed game rules.
 
     _Use /start if you're new or want the intro again._""",
         parse_mode='Markdown'
@@ -65,8 +68,8 @@ def intel(update: Update, context: CallbackContext):
 
 def newgame(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
-    games[chat_id] = {'players': {}, 'state': 'waiting', 'location': None, 'spy': None, 'votes': {}}
-    update.message.reply_text("\U0001F195 *New game created!*\nPlayers, use /join to participate.", parse_mode='Markdown')
+    games[chat_id] = {'players': {}, 'state': 'waiting', 'location': None, 'spy': None, 'votes': {}, 'timers': []}
+    update.message.reply_text("🆕 *New game created!*\nPlayers, use /join to participate.", parse_mode='Markdown')
 
 def join(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
@@ -104,7 +107,7 @@ def players(update: Update, context: CallbackContext):
         update.message.reply_text("❌ No game in progress.")
         return
     names = list(game['players'].values())
-    update.message.reply_text("\U0001F465 *Players:*\n" + "\n".join(names), parse_mode='Markdown')
+    update.message.reply_text("👥 *Players:*\n" + "\n".join(names), parse_mode='Markdown')
 
 def begin(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
@@ -125,6 +128,8 @@ def begin(update: Update, context: CallbackContext):
     game['location'] = location
     game['spy'] = spy
     game['votes'] = {}
+    game['update'] = update
+    game['context'] = context
 
     for uid in players:
         if uid == spy:
@@ -132,7 +137,15 @@ def begin(update: Update, context: CallbackContext):
         else:
             context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
 
-    update.message.reply_text("🎮 *Game started!* Discuss in group and use /vote to catch the spy.", parse_mode='Markdown')
+    update.message.reply_text("🎮 *Game started!* Discuss in group for 5 minutes. Then voting begins.", parse_mode='Markdown')
+
+    def trigger_vote():
+        context.bot.send_message(chat_id, "🗳️ Time's up! Voting begins now.")
+        vote(update, context)
+
+    timer = Timer(300, trigger_vote)
+    timer.start()
+    game['timers'].append(timer)
 
 def location_command(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
@@ -165,6 +178,12 @@ def vote(update: Update, context: CallbackContext):
     reply_markup = InlineKeyboardMarkup(keyboard)
     update.message.reply_text("🗳 *Who do you think is the spy?*", reply_markup=reply_markup, parse_mode='Markdown')
 
+    def timeout_vote():
+        context.bot.send_message(chat_id, "⏰ Voting time is up!")
+        finish_vote(chat_id, context)
+
+    Timer(60, timeout_vote).start()
+
 def vote_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     user_id = query.from_user.id
@@ -179,20 +198,55 @@ def vote_callback(update: Update, context: CallbackContext):
     game['votes'][user_id] = voted_id
     query.answer("Vote registered.")
 
-    total = len(game['players'])
-    if len(game['votes']) == total:
-        counts = {}
-        for v in game['votes'].values():
-            counts[v] = counts.get(v, 0) + 1
-        max_voted = max(counts, key=counts.get)
-        name = game['players'].get(max_voted, "Unknown")
-        if max_voted == game['spy']:
-            msg = f"✅ {name} was the spy and was caught! Civilians win!"
-        else:
-            spy_name = game['players'].get(game['spy'], "Unknown")
-            msg = f"❌ {name} was innocent. The spy was {spy_name}. Spy wins!"
+    if len(game['votes']) == len(game['players']):
+        finish_vote(chat_id, context)
+    
+def finish_vote(chat_id, context):
+    game = games.get(chat_id)
+    if not game:
+        return
+
+    votes = game['votes']
+    counts = {}
+    for v in votes.values():
+        counts[v] = counts.get(v, 0) + 1
+    max_voted = max(counts, key=counts.get)
+    name = game['players'].get(max_voted, "Unknown")
+
+    if max_voted == game['spy']:
+        msg = f"✅ {name} was the spy and was caught! Civilians win!"
         context.bot.send_message(chat_id=chat_id, text=msg)
         del games[chat_id]
+    else:
+        msg = f"❌ {name} was innocent. The spy was {game['players'].get(game['spy'], 'Unknown')}. Spy wins!"
+        context.bot.send_message(chat_id=chat_id, text=msg)
+        spy = game['spy']
+        context.bot.send_message(spy, "🕵️ You've survived… now guess the location! You have 30 seconds. Reply with your guess.")
+
+        def timeout_guess():
+            context.bot.send_message(chat_id, "⏰ Spy failed to guess in time. Civilians win!")
+            del games[chat_id]
+
+        Timer(30, timeout_guess).start()
+        game['awaiting_guess'] = True
+
+# Spy guess handler
+
+def handle_guess(update: Update, context: CallbackContext):
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+    game = games.get(chat_id)
+
+    if not game or not game.get('awaiting_guess') or user_id != game['spy']:
+        return
+
+    guess = update.message.text.strip().lower()
+    correct = game['location'].lower()
+    if guess == correct:
+        context.bot.send_message(chat_id, f"🎉 The spy guessed correctly ({guess}) and wins!")
+    else:
+        context.bot.send_message(chat_id, f"❌ The spy guessed {guess}, but the real location was {game['location']}. Civilians win!")
+    del games[chat_id]
 
 def endgame(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
@@ -219,6 +273,7 @@ def main():
     dp.add_handler(CommandHandler("vote", vote))
     dp.add_handler(CommandHandler("endgame", endgame))
     dp.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^vote:"))
+    dp.add_handler(MessageHandler(Filters.text & Filters.group, handle_guess))
 
     updater.start_polling()
     updater.idle()
