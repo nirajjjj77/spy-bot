@@ -25,18 +25,18 @@ locations = ["Beach", "Hospital", "Airport", "School", "Library", "Cinema", "Res
 
 # --- Command Handlers ---
 def start(update: Update, context: CallbackContext):
-    update.message.reply_text("\U0001F575\uFE0F Welcome to *AgentAmongUs*\!\nUse /help to know how to play\.", parse_mode='MarkdownV2')
+    update.message.reply_text("\U0001F575\uFE0F *Welcome to AgentAmongUs!*\nUse /help to know how to play.", parse_mode='Markdown')
 
 def help_command(update: Update, context: CallbackContext):
-    update.message.reply_text("\U0001F3AE *How to Play:*\n1 spy among civilians\.\nCivilians get same location\.\nSpy doesn’t\.\nDiscuss and /vote to find the spy\!\n/start to begin\, /join to enter\, /begin to start the game\.", parse_mode='MarkdownV2')
+    update.message.reply_text("\U0001F3AE *How to Play:*\n1 spy among civilians.\nCivilians get same location.\nSpy doesn’t.\nDiscuss and /vote to find the spy!\n/start to begin, /join to enter, /begin to start the game.", parse_mode='Markdown')
 
 def rules(update: Update, context: CallbackContext):
-    update.message.reply_text("\U0001F4DC *Rules:*\n- One spy, others are civilians\n- Civilians know a location\n- Spy pretends and guesses\n- Vote to catch the spy\!", parse_mode='MarkdownV2')
+    update.message.reply_text("\U0001F4DC *Rules:*\n- One spy, others are civilians\n- Civilians know a location\n- Spy pretends and guesses\n- Vote to catch the spy!", parse_mode='Markdown')
 
 def newgame(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
     games[chat_id] = {'players': {}, 'state': 'waiting', 'location': None, 'spy': None, 'votes': {}}
-    update.message.reply_text("\U0001F195 New game created\! Players\, use /join to participate\.")
+    update.message.reply_text("\U0001F195 *New game created!*\nPlayers, use /join to participate.", parse_mode='Markdown')
 
 def join(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
@@ -74,7 +74,7 @@ def players(update: Update, context: CallbackContext):
         update.message.reply_text("❌ No game in progress.")
         return
     names = list(game['players'].values())
-    update.message.reply_text("\U0001F9D1‍\U0001F91D\U0001F9D1 Players:\n" + "\n".join(names))
+    update.message.reply_text("\U0001F465 *Players:*\n" + "\n".join(names), parse_mode='Markdown')
 
 def begin(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
@@ -102,7 +102,7 @@ def begin(update: Update, context: CallbackContext):
         else:
             context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
 
-    update.message.reply_text("🎮 Game started! Discuss in group and use /vote to catch the spy.")
+    update.message.reply_text("🎮 *Game started!* Discuss in group and use /vote to catch the spy.", parse_mode='Markdown')
 
 def location_command(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
@@ -132,7 +132,7 @@ def vote(update: Update, context: CallbackContext):
         for uid, name in game['players'].items()
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("🗳 Who do you think is the spy?", reply_markup=reply_markup)
+    update.message.reply_text("🗳 *Who do you think is the spy?*", reply_markup=reply_markup, parse_mode='Markdown')
 
 def vote_callback(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -144,7 +144,7 @@ def vote_callback(update: Update, context: CallbackContext):
         query.answer("You’re not in the game.")
         return
 
-    voted_id = int(query.data.split(":")[1])
+    voted_id = int(query.data.split(":" )[1])
     game['votes'][user_id] = voted_id
     query.answer("Vote registered.")
 
@@ -162,7 +162,6 @@ def vote_callback(update: Update, context: CallbackContext):
             msg = f"❌ {name} was innocent. The spy was {spy_name}. Spy wins!"
         context.bot.send_message(chat_id=chat_id, text=msg)
         del games[chat_id]
-
 
 def endgame(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
