@@ -730,6 +730,9 @@ def check_achievements(user_id, stats):
         achievements.append(achievement)
         # You can send notification here if desired
 
+def test_command(update: Update, context: CallbackContext):
+    update.message.reply_text("✅ Test working!")
+
 # --- Main ---
 def main():
     updater = Updater(TOKEN, use_context=True)
@@ -753,6 +756,7 @@ def main():
     dp.add_handler(CommandHandler("stats", show_stats))
     dp.add_handler(CommandHandler("leaderboard", show_leaderboard))
     dp.add_handler(CommandHandler("achievements", show_achievements))
+    dp.add_handler(CommandHandler("test", test_command))
 
     updater.start_polling()
     updater.idle()
