@@ -131,8 +131,15 @@ def guide(update: Update, context: CallbackContext):
 🗳️ Use /vote to identify the spy.
 🎯 Catch the spy before time runs out!
 
+*Game Modes:*
+🎯 Normal - 5 min discussion, standard rules
+⚡ Speed - 2 min discussion, quick decisions  
+🏃 Marathon - 10 min discussion, deep strategy
+👥 Team Spy - 2 spies vs civilians (6+ players)
+🎭 Double Agent - Spy + agent with wrong location
+
 *Commands:*
-/newgame – Start a new game session.
+/newgame – Select mode and start new game session.
 /join – Join the ongoing game.
 /leave – Leave the current game.
 /players – Show current participants.
@@ -141,6 +148,7 @@ def guide(update: Update, context: CallbackContext):
 /vote – Vote who you think is the spy.
 /endgame – End the current game.
 /intel - Read the detailed game rules.
+/modes - See all available game modes.
 
 _Use /start if you're new or want the intro again._""",
         parse_mode='Markdown'
@@ -160,6 +168,20 @@ def intel(update: Update, context: CallbackContext):
 🎯 *Objectives:*
 - *Civilians:* Work together and vote out the spy without revealing the location.
 - *Spy:* Pretend to know the location. If you survive the vote, guess the location to win!
+
+---
+
+🎮 *Game Modes Available:*
+
+🎯 **Normal Mode:** Classic gameplay with 5-minute discussion and standard rules.
+
+⚡ **Speed Round:** Fast-paced 2-minute discussion, 30-second voting. Perfect for quick games and testing your instant instincts!
+
+🏃 **Marathon Mode:** Extended 10-minute discussion phase for deep psychological analysis and complex strategies. More time to deceive and deduce.
+
+👥 **Team Spy Mode:** Two spies work together! Requires 6+ players. Both spies know each other and must coordinate to survive. Civilians must catch BOTH spies to win.
+
+🎭 **Double Agent Mode:** Most chaotic mode! One real spy (no location) + one double agent (gets WRONG location but thinks they're civilian). Double agent will confidently give wrong clues, creating beautiful confusion. Civilians must identify both threats!
 
 ---
 
@@ -193,6 +215,18 @@ def intel(update: Update, context: CallbackContext):
 Good luck, Agent. Your mission starts soon. 🎩""",
         parse_mode='Markdown'
     )
+
+def modes(update: Update, context: CallbackContext):
+    modes_text = "🎮 *Available Game Modes:*\n\n"
+    
+    for mode_key, mode_data in GAME_MODES.items():
+        modes_text += f"{mode_data['name']}\n"
+        modes_text += f"⏱️ Discussion: {mode_data['discussion_time']//60} min\n"
+        modes_text += f"📝 {mode_data['description']}\n\n"
+    
+    modes_text += "Use /newgame to select a mode and start playing!"
+    
+    update.message.reply_text(modes_text, parse_mode='Markdown')
 
 def newgame(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
@@ -570,6 +604,7 @@ def main():
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("guide", guide))
     dp.add_handler(CommandHandler("intel", intel))
+    dp.add_handler(CommandHandler("modes", modes))
     dp.add_handler(CommandHandler("newgame", newgame))
     dp.add_handler(CommandHandler("join", join))
     dp.add_handler(CommandHandler("leave", leave))
