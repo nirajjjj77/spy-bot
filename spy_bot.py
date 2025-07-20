@@ -622,6 +622,9 @@ def endgame(update: Update, context: CallbackContext):
     else:
         update.message.reply_text("❌ No game to end.")
 
+def test_command(update: Update, context: CallbackContext):
+    update.message.reply_text("✅ Test working!")
+
 def show_stats(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     stats = player_stats.get(user_id, {})
@@ -729,9 +732,6 @@ def check_achievements(user_id, stats):
     for achievement in new_achievements:
         achievements.append(achievement)
         # You can send notification here if desired
-
-def test_command(update: Update, context: CallbackContext):
-    update.message.reply_text("✅ Test working!")
 
 # --- Main ---
 def main():
