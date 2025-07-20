@@ -195,15 +195,16 @@ def intel(update: Update, context: CallbackContext):
 ---
 
 👥 *Commands:*
-- `/newgame` – Create a new game
-- `/join` – Join the current game
-- `/begin` – Officially start the game
-- `/location` – Get your secret location (privately)
-- `/vote` – Vote who you suspect
-- `/endgame` – End the current game manually
-- `/players` – List of joined players
-- `/guide` – Quick gameplay instructions
-- `/intel` – You're here 😉
+/newgame – Create a new game
+/modes – List all game modes
+/join – Join the current game
+/begin – Officially start the game
+/location – Get your secret location (privately)
+/vote – Vote who you suspect
+/endgame – End the current game manually
+/players – List of joined players
+/guide – Quick gameplay instructions
+/intel – You're here 😉
 
 ---
 
