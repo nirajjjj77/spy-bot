@@ -328,8 +328,6 @@ def begin(update: Update, context: CallbackContext):
         else:
             context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
 
-    update.message.reply_text("🎮 *Game started!* Discuss in group for 5 minutes. Then voting begins.", parse_mode='Markdown')
-
     # Get mode configuration
     mode_config = GAME_MODES[game['mode']]
     discussion_time = mode_config['discussion_time']
