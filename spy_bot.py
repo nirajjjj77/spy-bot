@@ -327,21 +327,13 @@ def begin(update: Update, context: CallbackContext):
         update.message.reply_text("🚨 At least 3 players needed.")
         return
 
-    spy = random.choice(players)
     location = random.choice(locations)
     game['state'] = 'started'
     game['location'] = location
-    game['spy'] = spy
     game['votes'] = {}
     game['update'] = update
     game['context'] = context
-
-    for uid in players:
-        if uid == spy:
-            context.bot.send_message(uid, "🕵️ You are the SPY! Try to blend in and guess the location.")
-        else:
-            context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
-
+    
     # Get mode configuration
     mode_config = GAME_MODES[game['mode']]
     discussion_time = mode_config['discussion_time']
@@ -362,6 +354,7 @@ def begin(update: Update, context: CallbackContext):
                 context.bot.send_message(uid, f"🕵️ You are a SPY! Your partner is {other_name}. Work together!")
             else:
                 context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
+        return
     
     elif mode_config['special'] == 'double_agent':
         spy = random.choice(players)
@@ -380,6 +373,7 @@ def begin(update: Update, context: CallbackContext):
                 context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{fake_location}* ❌", parse_mode='Markdown')
             else:
                 context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
+        return
     else:
         # Normal mode (existing code)
         spy = random.choice(players)
