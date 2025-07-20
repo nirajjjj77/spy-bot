@@ -20,8 +20,51 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Game state
-# Structure: {chat_id: {players: {user_id: name}, state: 'waiting'/'started', location: str, spy: user_id, votes: {user_id: voted_id}, timers: [], update, context}}
+# Structure: {chat_id: {players: {user_id: name}, state: 'waiting'/'mode_select'/'started', mode: 'normal', location: str, spy: user_id, double_agent:user_id, votes: {user_id: voted_id}, timers: []}}
 games = {}
+# Game modes configuration
+GAME_MODES = {
+    'normal': {
+        'name': '🎯 Normal Mode',
+        'description': '5 min discussion, standard rules',
+        'discussion_time': 300,
+        'voting_time': 60,
+        'guess_time': 30,
+        'special': None
+    },
+    'speed': {
+        'name': '⚡ Speed Round',
+        'description': '2 min discussion, 30s voting',
+        'discussion_time': 120,
+        'voting_time': 30,
+        'guess_time': 20,
+        'special': None
+    },
+    'marathon': {
+        'name': '🏃 Marathon Mode',
+        'description': '10 min discussion for deep strategy',
+        'discussion_time': 600,
+        'voting_time': 90,
+        'guess_time': 45,
+        'special': None
+    },
+    'team_spy': {
+        'name': '👥 Team Spy',
+        'description': '2 spies vs civilians (6+ players)',
+        'discussion_time': 300,
+        'voting_time': 60,
+        'guess_time': 30,
+        'special': 'two_spies'
+    },
+    'double_agent': {
+        'name': '🎭 Double Agent',
+        'description': 'Spy + double agent with wrong location',
+        'discussion_time': 300,
+        'voting_time': 60,
+        'guess_time': 30,
+        'special': 'double_agent'
+    }
+}
 locations = [
     # 🌆 City Locations
     "Bank", "Train Station", "Police Station", "Fire Station", "Shopping Mall", "Parking Garage", "Post Office", "Apartment Complex",
@@ -156,8 +199,31 @@ def newgame(update: Update, context: CallbackContext):
     if chat_id in games:
         update.message.reply_text("⚠️ A game is already in progress. Use /endgame to end it before starting a new one.")
         return
-    games[chat_id] = {'players': {}, 'state': 'waiting', 'location': None, 'spy': None, 'votes': {}, 'timers': []}
-    update.message.reply_text("🆕 *New game created!*\nPlayers, use /join to participate.", parse_mode='Markdown')
+    
+    games[chat_id] = {
+        'players': {}, 
+        'state': 'mode_select', 
+        'mode': None,
+        'location': None, 
+        'spy': None, 
+        'double_agent': None,
+        'votes': {}, 
+        'timers': []
+    }
+    
+    # Create mode selection keyboard
+    keyboard = [
+        [InlineKeyboardButton(mode_data['name'], callback_data=f"mode:{mode_key}")]
+        for mode_key, mode_data in GAME_MODES.items()
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    update.message.reply_text(
+        "🎮 *Select Game Mode:*\n\n" + 
+        "\n".join([f"{data['name']}: {data['description']}" for data in GAME_MODES.values()]),
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
 
 def join(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
@@ -230,11 +296,63 @@ def begin(update: Update, context: CallbackContext):
 
     update.message.reply_text("🎮 *Game started!* Discuss in group for 5 minutes. Then voting begins.", parse_mode='Markdown')
 
+    # Get mode configuration
+    mode_config = GAME_MODES[game['mode']]
+    discussion_time = mode_config['discussion_time']
+
+    # Handle special modes
+    if mode_config['special'] == 'two_spies':
+        if len(players) < 6:
+            update.message.reply_text("🚨 Team Spy mode needs at least 6 players.")
+            return
+        spies = random.sample(players, 2)
+        game['spy'] = spies
+        
+        # Send messages for two spies
+        for uid in players:
+            if uid in spies:
+                other_spy = [s for s in spies if s != uid][0]
+                other_name = game['players'][other_spy]
+                context.bot.send_message(uid, f"🕵️ You are a SPY! Your partner is {other_name}. Work together!")
+            else:
+                context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
+    
+    elif mode_config['special'] == 'double_agent':
+        spy = random.choice(players)
+        remaining = [p for p in players if p != spy]
+        double_agent = random.choice(remaining)
+        fake_location = random.choice([loc for loc in locations if loc != location])
+        
+        game['spy'] = spy
+        game['double_agent'] = double_agent
+        
+        # Send messages for double agent mode
+        for uid in players:
+            if uid == spy:
+                context.bot.send_message(uid, "🕵️ You are the SPY! Try to blend in and guess the location.")
+            elif uid == double_agent:
+                context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{fake_location}* ❌", parse_mode='Markdown')
+            else:
+                context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
+    else:
+        # Normal mode (existing code)
+        spy = random.choice(players)
+        game['spy'] = spy
+        
+        for uid in players:
+            if uid == spy:
+                context.bot.send_message(uid, "🕵️ You are the SPY! Try to blend in and guess the location.")
+            else:
+                context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
+
+    update.message.reply_text(f"🎮 *{mode_config['name']} started!* Discuss for {discussion_time//60} minutes.", parse_mode='Markdown')
+
     def trigger_vote():
         context.bot.send_message(chat_id, "🗳️ Time's up! Voting begins now.")
         vote(update, context)
 
-    timer = Timer(300, trigger_vote)
+    timer = Timer(discussion_time, trigger_vote)
+
     timer.start()
     game['timers'].append(timer)
 
@@ -280,7 +398,15 @@ def vote(update: Update, context: CallbackContext):
         context.bot.send_message(chat_id, "⏰ Voting time is up!")
         finish_vote(chat_id, context)
 
-    Timer(60, timeout_vote).start()
+    # Get voting time from mode config
+    mode_config = GAME_MODES[game['mode']]
+    voting_time = mode_config['voting_time']
+
+    def timeout_vote():
+        context.bot.send_message(chat_id, "⏰ Voting time is up!")
+        finish_vote(chat_id, context)
+
+    Timer(voting_time, timeout_vote).start()
 
     def vote_progress():
         if chat_id in games:
@@ -306,7 +432,30 @@ def vote_callback(update: Update, context: CallbackContext):
 
     if len(game['votes']) == len(game['players']):
         finish_vote(chat_id, context)
+
+def mode_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    game = games.get(chat_id)
     
+    if not game or game['state'] != 'mode_select':
+        query.answer("Invalid game state.")
+        return
+    
+    mode = query.data.split(":")[1]
+    game['mode'] = mode
+    game['state'] = 'waiting'
+    
+    mode_info = GAME_MODES[mode]
+    query.answer(f"Selected: {mode_info['name']}")
+    
+    context.bot.edit_message_text(
+        text=f"✅ *{mode_info['name']} Selected!*\n{mode_info['description']}\n\nPlayers, use /join to participate.",
+        chat_id=chat_id,
+        message_id=query.message.message_id,
+        parse_mode='Markdown'
+    )
+
 def finish_vote(chat_id, context):
     game = games.get(chat_id)
     if not game:
@@ -339,6 +488,31 @@ def finish_vote(chat_id, context):
     name = game['players'].get(chosen, 'Unknown')
     context.bot.send_message(chat_id, breakdown, parse_mode='Markdown')
 
+    # Handle special mode win conditions
+    mode_config = GAME_MODES[game['mode']]
+    
+    if mode_config['special'] == 'team_spy':
+        if chosen in game['spy']:  # One spy caught
+            msg = f"✅ {name} was a spy! But their partner is still hidden..."
+            context.bot.send_message(chat_id=chat_id, text=msg)
+            # Continue game with remaining spy
+            game['spy'] = [s for s in game['spy'] if s != chosen]
+            return
+    elif mode_config['special'] == 'double_agent':
+        if chosen == game['spy']:
+            msg = f"✅ {name} was the real spy! But the double agent is still among you..."
+            context.bot.send_message(chat_id=chat_id, text=msg)
+            # Let them vote again for double agent
+            return
+        elif chosen == game['double_agent']:
+            if game['spy'] in [uid for uid, votes in game['votes'].items()]:  # Spy also got votes
+                msg = f"✅ {name} was the double agent AND the real spy was caught! Civilians win! 🎉"
+            else:
+                msg = f"❌ {name} was the double agent, but the real spy escaped! Spy wins!"
+            context.bot.send_message(chat_id=chat_id, text=msg)
+            del games[chat_id]
+            return
+    
     if chosen == game['spy']:
         msg = f"✅ {name} was the spy and was caught! Civilians win! 🎉"
         context.bot.send_message(chat_id=chat_id, text=msg)
@@ -354,7 +528,8 @@ def finish_vote(chat_id, context):
             if chat_id in games:
                 del games[chat_id]
 
-        Timer(30, timeout_guess).start()
+        guess_time = GAME_MODES[game['mode']]['guess_time']
+        Timer(guess_time, timeout_guess).start()
         game['awaiting_guess'] = True
 
 # Spy guess handler
@@ -405,6 +580,7 @@ def main():
     dp.add_handler(CommandHandler("endgame", endgame))
     dp.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^vote:"))
     dp.add_handler(MessageHandler(Filters.text, handle_guess))
+    dp.add_handler(CallbackQueryHandler(mode_callback, pattern=r"^mode:"))
 
     updater.start_polling()
     updater.idle()
