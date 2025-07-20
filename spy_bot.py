@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 # Game state
 # Structure: {chat_id: {players: {user_id: name}, state: 'waiting'/'mode_select'/'started', mode: 'normal', location: str, spy: user_id, double_agent:user_id, votes: {user_id: voted_id}, timers: []}}
 games = {}
+# Add this new dictionary for player statistics
+
+player_stats = {}
+# Structure: {user_id: {'games_played': int, 'spy_wins': int, 'civilian_wins': int, 'spy_games': int, 'civilian_games': int, 'spies_caught': int, 'achievements': []}}
+
 # Game modes configuration
 GAME_MODES = {
     'normal': {
@@ -147,8 +152,12 @@ def guide(update: Update, context: CallbackContext):
 /location – Civilians can check their secret location.
 /vote – Vote who you think is the spy.
 /endgame – End the current game.
+/guide - Quick gameplay instructions.
 /intel - Read the detailed game rules.
 /modes - See all available game modes.
+/stats - View your personal game statistics and win rates.
+/leaderboard - See top players rankings
+/achievements - Check your unlocked achievements
 
 _Use /start if you're new or want the intro again._""",
         parse_mode='Markdown'
@@ -196,15 +205,19 @@ def intel(update: Update, context: CallbackContext):
 
 👥 *Commands:*
 /newgame – Create a new game
-/modes – List all game modes
 /join – Join the current game
+/leave – Leave the current game
+/players – List of joined players
 /begin – Officially start the game
 /location – Get your secret location (privately)
 /vote – Vote who you suspect
 /endgame – End the current game manually
-/players – List of joined players
 /guide – Quick gameplay instructions
 /intel – You're here 😉
+/modes – List all game modes
+/stats – View your personal game statistics
+/leaderboard – See top players rankings
+/achievements – Check your unlocked achievements
 
 ---
 
@@ -500,7 +513,7 @@ def finish_vote(chat_id, context):
         counts[voted] = counts.get(voted, 0) + 1
 
     # Prepare vote breakdown
-    breakdown = "🗳️ *Voting Result:*/n"
+    breakdown = "🗳️ *Voting Result:*\n"
     for voter_id, voted_id in votes.items():
         voter_name = game['players'].get(voter_id, 'Unknown')
         voted_name = game['players'].get(voted_id, 'Unknown')
@@ -520,6 +533,15 @@ def finish_vote(chat_id, context):
 
     name = game['players'].get(chosen, 'Unknown')
     context.bot.send_message(chat_id, breakdown, parse_mode='Markdown')
+
+    # Update statistics for voting
+    for voter_id in game['votes']:
+        if voter_id not in player_stats:
+            player_stats[voter_id] = {'games_played': 0, 'spy_wins': 0, 'civilian_wins': 0, 'spy_games': 0, 'civilian_games': 0, 'spies_caught': 0, 'achievements': [], 'name': game['players'].get(voter_id, 'Unknown')}
+    
+        # Check if they caught the spy
+        if game['votes'][voter_id] == game['spy']:
+            player_stats[voter_id]['spies_caught'] += 1
 
     # Handle special mode win conditions
     mode_config = GAME_MODES[game['mode']]
@@ -549,6 +571,11 @@ def finish_vote(chat_id, context):
     if chosen == game['spy']:
         msg = f"✅ {name} was the spy and was caught! Civilians win! 🎉"
         context.bot.send_message(chat_id=chat_id, text=msg)
+
+        #update win stats for all players
+        for player_id in game['players']:
+            update_player_stats(player_id, game['players'][player_id], 'civilian_win', player_id == game['spy'])
+        
         del games[chat_id]
     else:
         msg = f"❌ {name} was innocent. The spy was {game['players'].get(game['spy'], 'Unknown')}. Spy wins!"
@@ -595,6 +622,114 @@ def endgame(update: Update, context: CallbackContext):
     else:
         update.message.reply_text("❌ No game to end.")
 
+def show_stats(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    stats = player_stats.get(user_id, {})
+    if not stats:
+        update.message.reply_text("📊 No games played yet! Join a game to start building your stats.")
+        return
+    
+    games_played = stats.get('games_played', 0)
+    spy_wins = stats.get('spy_wins', 0)
+    civilian_wins = stats.get('civilian_wins', 0)
+    spy_games = stats.get('spy_games', 0)
+    spies_caught = stats.get('spies_caught', 0)
+    
+    spy_win_rate = (spy_wins / spy_games * 100) if spy_games > 0 else 0
+    civilian_win_rate = (civilian_wins / (games_played - spy_games) * 100) if (games_played - spy_games) > 0 else 0
+    
+    stats_text = f"""📊 *Your Statistics:*
+    
+🎮 Games Played: {games_played}
+🕵️ Times as Spy: {spy_games}
+👥 Times as Civilian: {games_played - spy_games}
+
+🏆 *Win Rates:*
+🕵️ Spy Success: {spy_win_rate:.1f}% ({spy_wins}/{spy_games})
+👥 Civilian Success: {civilian_win_rate:.1f}% ({civilian_wins}/{games_played - spy_games})
+🎯 Spies Caught: {spies_caught}
+
+🏅 Achievements: {len(stats.get('achievements', []))}"""
+    
+    update.message.reply_text(stats_text, parse_mode='Markdown')
+
+def show_leaderboard(update: Update, context: CallbackContext):
+    if not player_stats:
+        update.message.reply_text("📊 No stats available yet!")
+        return
+    
+    # Sort players by various metrics
+    spy_masters = sorted(player_stats.items(), key=lambda x: x[1].get('spy_wins', 0), reverse=True)[:5]
+    detectives = sorted(player_stats.items(), key=lambda x: x[1].get('spies_caught', 0), reverse=True)[:5]
+    
+    leaderboard = "🏆 *LEADERBOARD*\n\n🕵️ *Top Spy Masters:*\n"
+    for i, (user_id, stats) in enumerate(spy_masters, 1):
+        name = stats.get('name', f'Agent {user_id}')
+        wins = stats.get('spy_wins', 0)
+        leaderboard += f"{i}. {name}: {wins} spy wins\n"
+    
+    leaderboard += "\n🎯 *Top Detectives:*\n"
+    for i, (user_id, stats) in enumerate(detectives, 1):
+        name = stats.get('name', f'Agent {user_id}')
+        caught = stats.get('spies_caught', 0)
+        leaderboard += f"{i}. {name}: {caught} spies caught\n"
+    
+    update.message.reply_text(leaderboard, parse_mode='Markdown')
+
+def show_achievements(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    stats = player_stats.get(user_id, {})
+    achievements = stats.get('achievements', [])
+    
+    if not achievements:
+        update.message.reply_text("🏅 No achievements yet! Keep playing to unlock them.")
+        return
+    
+    achievement_text = "🏅 *Your Achievements:*\n\n" + "\n".join([f"🎖️ {achievement}" for achievement in achievements])
+    update.message.reply_text(achievement_text, parse_mode='Markdown')
+
+def update_player_stats(user_id, name, result_type, was_spy):
+    if user_id not in player_stats:
+        player_stats[user_id] = {
+            'games_played': 0, 'spy_wins': 0, 'civilian_wins': 0, 
+            'spy_games': 0, 'civilian_games': 0, 'spies_caught': 0, 
+            'achievements': [], 'name': name
+        }
+    
+    stats = player_stats[user_id]
+    stats['games_played'] += 1
+    stats['name'] = name  # Update name in case it changed
+    
+    if was_spy:
+        stats['spy_games'] += 1
+        if result_type == 'spy_win':
+            stats['spy_wins'] += 1
+    else:
+        stats['civilian_games'] += 1
+        if result_type == 'civilian_win':
+            stats['civilian_wins'] += 1
+    
+    # Check for achievements
+    check_achievements(user_id, stats)
+
+def check_achievements(user_id, stats):
+    achievements = stats['achievements']
+    new_achievements = []
+    
+    # Achievement checks
+    if stats['spy_wins'] >= 5 and 'Master Spy' not in achievements:
+        new_achievements.append('Master Spy')
+    if stats['spies_caught'] >= 10 and 'Super Detective' not in achievements:
+        new_achievements.append('Super Detective')
+    if stats['games_played'] >= 50 and 'Veteran Agent' not in achievements:
+        new_achievements.append('Veteran Agent')
+    if stats['spy_games'] >= 20 and 'Professional Deceiver' not in achievements:
+        new_achievements.append('Professional Deceiver')
+    
+    for achievement in new_achievements:
+        achievements.append(achievement)
+        # You can send notification here if desired
+
 # --- Main ---
 def main():
     updater = Updater(TOKEN, use_context=True)
@@ -615,6 +750,9 @@ def main():
     dp.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^vote:"))
     dp.add_handler(MessageHandler(Filters.text, handle_guess))
     dp.add_handler(CallbackQueryHandler(mode_callback, pattern=r"^mode:"))
+    dp.add_handler(CommandHandler("stats", show_stats))
+    dp.add_handler(CommandHandler("leaderboard", show_leaderboard))
+    dp.add_handler(CommandHandler("achievements", show_achievements))
 
     updater.start_polling()
     updater.idle()
