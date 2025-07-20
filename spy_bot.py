@@ -186,10 +186,10 @@ def intel(update: Update, context: CallbackContext):
 ---
 
 ⏱️ *Game Phases:*
-1. **Join Phase:** Players use `/join` to enter the game.
-2. **Start Game:** Host uses `/begin` to assign roles and start the timer.
+1. **Join Phase:** Players use /join to enter the game.
+2. **Start Game:** Host uses /begin to assign roles and start the timer.
 3. **Discussion (5 minutes):** Talk in group, ask questions, act casual.
-4. **Voting (1 minute):** Use `/vote` to choose who you think is the spy.
+4. **Voting (1 minute):** Use /vote to choose who you think is the spy.
 5. **Spy Guess (30 sec):** If spy survives, they try guessing the location.
 
 ---
