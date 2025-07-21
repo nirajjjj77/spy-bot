@@ -689,6 +689,7 @@ def endgame(update: Update, context: CallbackContext):
         update.message.reply_text("❌ No game to end.")
 
 def test_command(update: Update, context: CallbackContext):
+    print("TEST COMMAND TRIGGERED")
     update.message.reply_text("✅ Test working!")
 
 def show_stats(update: Update, context: CallbackContext):
