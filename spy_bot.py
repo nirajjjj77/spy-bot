@@ -1193,6 +1193,24 @@ def error_handler(update: Update, context: CallbackContext):
         except Exception as e:
             logger.error(f"Failed to notify admin {admin_id}: {e}")
 
+# Add this temporary function to your bot
+def debug_user_id(update: Update, context: CallbackContext):
+    """Debug function to get user ID"""
+    user_id = update.effective_user.id
+    username = update.effective_user.username
+    first_name = update.effective_user.first_name
+    
+    debug_info = f"""🔍 **Debug Info:**
+Your User ID: `{user_id}`
+Username: @{username or 'None'}
+First Name: {first_name}
+
+Current ADMIN_IDS: {ADMIN_IDS}
+Is Admin: {is_admin(user_id)}
+"""
+    
+    update.message.reply_text(debug_info, parse_mode='Markdown')
+
 # --- Main ---
 def main():
     """Start the bot"""
@@ -1217,6 +1235,7 @@ def main():
         ('leaderboard', show_leaderboard),
         ('achievements', show_achievements),
         ('adminstats', admin_stats)
+        ('myid', debug_user_id),  # Debug command
     ]
     
     for cmd, handler in commands:
