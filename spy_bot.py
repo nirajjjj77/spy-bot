@@ -1,31 +1,76 @@
-# Upgraded AgentAmongUs Bot (Python-Telegram-Bot v13.15 compatible)
-# Improvements: Voting, UX, error checks, multiple games, persistent game logic
+#!/usr/bin/env python3
+# Enhanced Spy Bot - The Ultimate Social Deduction Game Bot
+# Features: Robust error handling, advanced game mechanics, comprehensive stats, achievement system
 
-from dotenv import load_dotenv
 import os
 import logging
 import random
-from threading import Timer
+from threading import Timer, Lock
+from datetime import datetime
+from typing import Dict, List, Optional, Union
+from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackContext, CallbackQueryHandler, MessageHandler, Filters
+from telegram.ext import (
+    Updater, CommandHandler, CallbackContext, CallbackQueryHandler,
+    MessageHandler, Filters, Dispatcher
+)
 
-# Load environment
+# ---Configuration---
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id]
+
 if not TOKEN:
     raise ValueError("BOT_TOKEN is missing. Please set it in environment.")
 
-# Logging setup
-logging.basicConfig(level=logging.INFO)
+# Enhanced logging setup
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+)
 logger = logging.getLogger(__name__)
 
-# Game state
-# Structure: {chat_id: {players: {user_id: name}, state: 'waiting'/'mode_select'/'started', mode: 'normal', location: str, spy: user_id, double_agent:user_id, votes: {user_id: voted_id}, timers: []}}
-games = {}
-player_stats = {}
-# Structure: {user_id: {'games_played': int, 'spy_wins': int, 'civilian_wins': int, 'spy_games': int, 'civilian_games': int, 'spies_caught': int, 'achievements': []}}
+# Thread-safe data structures
+class GameState:
+    def __init__(self):
+        self.lock = Lock()
+        self.games: Dict[int, dict] = {}  # {chat_id: game_data}
+        self.player_stats: Dict[int, dict] = {}  # {user_id: stats}
+        self.active_timers: Dict[int, List[Timer]] = {}  # {chat_id: timers}
 
-# Game modes configuration
+    def get_game(self, chat_id: int) -> Optional[dict]:
+        with self.lock:
+            return self.games.get(chat_id)
+
+    def add_game(self, chat_id: int, game_data: dict):
+        with self.lock:
+            self.games[chat_id] = game_data
+
+    def remove_game(self, chat_id: int):
+        with self.lock:
+            if chat_id in self.games:
+                del self.games[chat_id]
+            if chat_id in self.active_timers:
+                for timer in self.active_timers[chat_id]:
+                    timer.cancel()
+                del self.active_timers[chat_id]
+
+    def add_timer(self, chat_id: int, timer: Timer):
+        with self.lock:
+            if chat_id not in self.active_timers:
+                self.active_timers[chat_id] = []
+            self.active_timers[chat_id].append(timer)
+
+    def clear_timers(self, chat_id: int):
+        with self.lock:
+            if chat_id in self.active_timers:
+                for timer in self.active_timers[chat_id]:
+                    timer.cancel()
+                self.active_timers[chat_id] = []
+
+game_state = GameState()
+
+# Enhanced game modes configuration
 GAME_MODES = {
     'normal': {
         'name': '🎯 Normal Mode',
@@ -33,6 +78,7 @@ GAME_MODES = {
         'discussion_time': 300,
         'voting_time': 60,
         'guess_time': 30,
+        'min_players': 3,
         'special': None
     },
     'speed': {
@@ -41,6 +87,7 @@ GAME_MODES = {
         'discussion_time': 120,
         'voting_time': 30,
         'guess_time': 20,
+        'min_players': 3,
         'special': None
     },
     'marathon': {
@@ -49,6 +96,7 @@ GAME_MODES = {
         'discussion_time': 600,
         'voting_time': 90,
         'guess_time': 45,
+        'min_players': 4,
         'special': None
     },
     'team_spy': {
@@ -57,778 +105,1136 @@ GAME_MODES = {
         'discussion_time': 300,
         'voting_time': 60,
         'guess_time': 30,
+        'min_players': 6,
         'special': 'two_spies'
     },
     'double_agent': {
         'name': '🎭 Double Agent',
-        'description': 'Spy + double agent with wrong location',
+        'description': 'Spy + agent with wrong location',
         'discussion_time': 300,
         'voting_time': 60,
         'guess_time': 30,
+        'min_players': 4,
         'special': 'double_agent'
+    },
+    'chaos': {
+        'name': '🌀 Chaos Mode',
+        'description': 'Multiple spies and double agents',
+        'discussion_time': 360,
+        'voting_time': 75,
+        'guess_time': 40,
+        'min_players': 8,
+        'special': 'chaos'
     }
 }
 
-locations = [
-    # 🌆 City Locations
-    "Bank", "Train Station", "Police Station", "Fire Station", "Shopping Mall", "Parking Garage", "Post Office", "Apartment Complex",
-    "Metro Station", "Taxi Stand", "Highway Toll Booth", "Train Compartment", "Dockyard",
+# Expanded locations database with categories
+LOCATIONS = {
+    "🌆 City": [
+        "Bank", "Train Station", "Police Station", "Fire Station", 
+        "Shopping Mall", "Parking Garage", "Post Office", "Apartment Complex",
+        "Metro Station", "Taxi Stand", "Highway Toll Booth", "Train Compartment"
+    ],
+    "🏫 Education": [
+        "University", "Kindergarten", "Science Lab", "Art Studio", 
+        "Debate Hall", "Library", "School"
+    ],
+    "🏥 Medical": [
+        "Hospital", "Dentist Office", "Pharmacy", 
+        "Veterinary Clinic", "Psychiatric Hospital"
+    ],
+    "✈️ Travel": [
+        "Airport", "Space Station", "Cruise Ship", 
+        "Border Checkpoint", "Ferry Terminal", "Airplane"
+    ],
+    "🍕 Entertainment": [
+        "Cinema", "Ice Cream Shop", "Nightclub", "Game Arcade", 
+        "Buffet Restaurant", "Karaoke Bar", "Bowling Alley", "Theme Park"
+    ],
+    "🏰 Fictional": [
+        "Wizard School", "Supervillain Lair", "Zombie Apocalypse Shelter", 
+        "Pirate Ship", "Alien Planet", "Time Machine"
+    ],
+    "⚔️ Historical": [
+        "Roman Colosseum", "Medieval Castle", "Ancient Pyramid", 
+        "World War Bunker", "Samurai Dojo", "Wild West Saloon"
+    ],
+    "🧪 Scientific": [
+        "Nuclear Reactor", "Control Room", "Space Research Center", 
+        "Submarine", "Secret Lab", "Particle Accelerator"
+    ],
+    "🌳 Outdoor": [
+        "Beach", "Forest Camp", "Waterfall", "Hiking Trail", 
+        "Farm", "Desert Camp", "Jungle Safari"
+    ]
+}
 
-    # 🏫 Educational & Institutional
-    "University", "Kindergarten", "Science Lab", "Art Studio", "Debate Hall",
+# Achievements system
+ACHIEVEMENTS = {
+    "rookie": {"name": "Rookie Agent", "condition": lambda s: s['games_played'] >= 1},
+    "spy_novice": {"name": "Spy Novice", "condition": lambda s: s['spy_wins'] >= 3},
+    "detective": {"name": "Junior Detective", "condition": lambda s: s['spies_caught'] >= 5},
+    "master_spy": {"name": "Master Spy", "condition": lambda s: s['spy_wins'] >= 10 and s['spy_games'] >= 20},
+    "super_sleuth": {"name": "Super Sleuth", "condition": lambda s: s['spies_caught'] >= 20},
+    "veteran": {"name": "Veteran Agent", "condition": lambda s: s['games_played'] >= 50},
+    "deceiver": {"name": "Master Deceiver", "condition": lambda s: s['spy_wins'] >= 15 and s['spy_win_rate'] >= 70},
+    "team_player": {"name": "Team Player", "condition": lambda s: s['civilian_wins'] >= 20},
+    "perfectionist": {"name": "Perfectionist", "condition": lambda s: s['civilian_win_rate'] >= 80 and s['civilian_games'] >= 15},
+    "legend": {"name": "Legendary Agent", "condition": lambda s: s['games_played'] >= 100 and s['spy_win_rate'] >= 60 and s['civilian_win_rate'] >= 60}
+}
 
-    # 🏥 Medical / Health
-    "Hospital", "Dentist Office", "Pharmacy", "Veterinary Clinic", "Psychiatric Hospital",
+# --- Helper Functions ---
+def get_random_location(category: str = None) -> str:
+    """Get a random location, optionally filtered by category"""
+    if category and category in LOCATIONS:
+        return random.choice(LOCATIONS[category])
+    all_locations = [loc for sublist in LOCATIONS.values() for loc in sublist]
+    return random.choice(all_locations)
 
-    # 🛫 Travel & Transit
-    "Airport", "Space Station", "Cruise Ship", "Border Checkpoint", "Ferry Terminal", "Airplane",
+def format_time(seconds: int) -> str:
+    """Convert seconds to human-readable time format"""
+    minutes, seconds = divmod(seconds, 60)
+    return f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
 
-    # 🏠 Indoor Settings
-    "Elevator", "Basement", "Attic", "Rooftop Garden", "Garage Workshop",
+def is_admin(user_id: int) -> bool:
+    """Check if user is admin"""
+    return user_id in ADMIN_IDS
 
-    # 🍕 Food & Entertainment
-    "Cinema", "Ice Cream Shop", "Nightclub", "Game Arcade", "Buffet Restaurant", "Food Truck", "Karaoke Bar", "Bowling Alley", "Escape Room", "Laser Tag Arena", "VR Arcade", "Theme Park",
+def validate_game(chat_id: int, user_id: int = None, state: str = None) -> bool:
+    """Validate game state and user permissions"""
+    game = game_state.get_game(chat_id)
+    if not game:
+        return False
+    if user_id and user_id not in game['players']:
+        return False
+    if state and game['state'] != state:
+        return False
+    return True
 
-    # 🌳 Outdoor & Nature
-    "Beach", "Forest Camp", "Waterfall", "Hiking Trail", "Farm", "Desert Camp", "Jungle Safari",
+def cancel_timers(chat_id: int):
+    """Cancel all active timers for a game"""
+    game_state.clear_timers(chat_id)
 
-    # 🏰 Fictional / Fun
-    "Wizard School", "Supervillain Lair", "Zombie Apocalypse Shelter", "Pirate Ship", "Alien Planet",
+def send_to_all_players(context: CallbackContext, chat_id: int, message: str, exclude: List[int] = None):
+    """Send message to all players in a game"""
+    game = game_state.get_game(chat_id)
+    if not game:
+        return
+    
+    exclude = exclude or []
+    for player_id in game['players']:
+        if player_id not in exclude:
+            try:
+                context.bot.send_message(player_id, message, parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"Failed to send message to {player_id}: {e}")
 
-    # ⚔️ Historical
-    "Roman Colosseum", "Medieval Castle", "Ancient Pyramid", "World War Bunker", "Samurai Dojo",
-
-    # ⛪ Religious / Cultural
-    "Church", "Mosque", "Temple", "Cemetery", "Wedding Hall",
-
-    # 🏢 Office & Workplaces
-    "Startup Office", "Call Center", "Recording Studio", "Newsroom", "Conference Room",
-
-    # 🧪 Scientific / Military
-    "Nuclear Reactor", "Control Room", "Space Research Center", "Submarine", "Secret Lab",
-
-    # 🏫 Others
-    "Library", "Restaurant", "School", "Museum", "Zoo"
-]
-
-# --- Command Handlers ---
+# --- Command handlers ---
 def start(update: Update, context: CallbackContext):
+    """Send welcome message"""
     update.message.reply_text(
-        """🕵️‍♂️ *Welcome, Agent!*  
-You've entered the world of *deception, deduction, and danger!* 🔍💣
+        """🕵️‍♂️ *Welcome to Spy Bot - Ultimate Social Deduction Game!*
 
-🎯 *Goal:* Blend in, lie smart, and expose the SPY (or hide if you are one 😏).
+🎯 *Your Mission:* Blend in, lie smart, and expose the SPY (or hide if you are one 😏).
 
-🎮 Use /guide to learn the rules or /newgame to create a new mission!""",
+🎮 *Quick Start:*
+• Use /guide for rules
+• Use /newgame to create a mission
+• Use /stats to see your progress
+
+🆕 *What's New:*
+• Enhanced game modes including Chaos Mode 💀
+• Improved statistics and achievements 🏅
+• Better admin controls and error handling
+• Persistent data storage
+
+Ready to begin your mission, Agent?""",
         parse_mode='Markdown'
     )
 
 def guide(update: Update, context: CallbackContext):
+    """Send quick guide"""
     update.message.reply_text(
-        """🎮 *How to Play:*
+        """🎮 *Quick Guide:*
 
-🕵️ There is *1 spy* and multiple civilians.
-📍 Civilians are told the same location.
-❌ The spy does *not* know the location.
+1. Host creates game with /newgame
+2. Players join with /join
+3. Host starts with /begin
+4. Discuss and ask questions
+5. Vote with /vote when ready
+6. Spy gets to guess if not caught
 
-💬 Discuss among yourselves.
-🗳️ Use /vote to identify the spy.
-🎯 Catch the spy before time runs out!
+*Key Commands:*
+/newgame - Create game
+/join - Join current game
+/begin - Start game
+/vote - Start voting
+/location - Check your role
+/stats - View your statistics
 
-*Game Modes:*
-🎯 Normal - 5 min discussion, standard rules
-⚡ Speed - 2 min discussion, quick decisions  
-🏃 Marathon - 10 min discussion, deep strategy
-👥 Team Spy - 2 spies vs civilians (6+ players)
-🎭 Double Agent - Spy + agent with wrong location
-
-*Commands:*
-/newgame – Select mode and start new game session.
-/join – Join the ongoing game.
-/leave – Leave the current game.
-/players – Show current participants.
-/begin – Begin the mission (minimum 3 players).
-/location – Civilians can check their secret location.
-/vote – Vote who you think is the spy.
-/endgame – End the current game.
-/guide - Quick gameplay instructions.
-/intel - Read the detailed game rules.
-/modes - See all available game modes.
-/stats - View your personal game statistics and win rates.
-/leaderboard - See top players rankings
-/achievements - Check your unlocked achievements
-
-_Use /start if you're new or want the intro again._""",
+For full details, use /intel""",
         parse_mode='Markdown'
     )
 
 def intel(update: Update, context: CallbackContext):
+    """Send detailed instructions"""
+    modes_text = "\n".join([
+        f"• {mode['name']}: {mode['description']} (Min players: {mode['min_players']})"
+        for mode in GAME_MODES.values()
+    ])
+    
     update.message.reply_text(
-        """📖 *INTEL — Deep Briefing for Agents*
+        f"""📚 *Spy Bot Comprehensive Guide*
 
-🕵️‍♂️ *Game Overview:*
-- 1 player is randomly chosen as the *Spy*.
-- All others are *Civilians* and get the *same secret location*.
-- The spy gets *no location* and must figure it out based on discussion.
-
----
-
-🎯 *Objectives:*
-- *Civilians:* Work together and vote out the spy without revealing the location.
-- *Spy:* Pretend to know the location. If you survive the vote, guess the location to win!
-
----
-
-🎮 *Game Modes Available:*
-
-🎯 **Normal Mode:** Classic gameplay with 5-minute discussion and standard rules.
-
-⚡ **Speed Round:** Fast-paced 2-minute discussion, 30-second voting. Perfect for quick games and testing your instant instincts!
-
-🏃 **Marathon Mode:** Extended 10-minute discussion phase for deep psychological analysis and complex strategies. More time to deceive and deduce.
-
-👥 **Team Spy Mode:** Two spies work together! Requires 6+ players. Both spies know each other and must coordinate to survive. Civilians must catch BOTH spies to win.
-
-🎭 **Double Agent Mode:** Most chaotic mode! One real spy (no location) + one double agent (gets WRONG location but thinks they're civilian). Double agent will confidently give wrong clues, creating beautiful confusion. Civilians must identify both threats!
-
----
+🎯 *Objective:*
+Civilians must identify the Spy through discussion and voting.
+The Spy must blend in and guess the location if not caught.
 
 ⏱️ *Game Phases:*
-1. **Join Phase:** Players use /join to enter the game.
-2. **Start Game:** Host uses /begin to assign roles and start the timer.
-3. **Discussion (5 minutes):** Talk in group, ask questions, act casual.
-4. **Voting (1 minute):** Use /vote to choose who you think is the spy.
-5. **Spy Guess (30 sec):** If spy survives, they try guessing the location.
+1. Joining (/join)
+2. Discussion (ask questions)
+3. Voting (/vote)
+4. Spy's guess (if applicable)
 
----
+🎮 *Game Modes:*
+{modes_text}
 
-👥 *Commands:*
-/newgame – Create a new game
-/join – Join the current game
-/leave – Leave the current game
-/players – List of joined players
-/begin – Officially start the game
-/location – Get your secret location (privately)
-/vote – Vote who you suspect
-/endgame – End the current game manually
-/guide – Quick gameplay instructions
-/intel – You're here 😉
-/modes – List all game modes
-/stats – View your personal game statistics
-/leaderboard – See top players rankings
-/achievements – Check your unlocked achievements
+🏆 *Scoring:*
+- Civilians win if they catch the Spy
+- Spy wins if they survive or guess correctly
 
----
+📊 *Statistics Tracked:*
+- Games played as Spy/Civilian
+- Win rates
+- Spies caught
+- Achievements unlocked
 
-💡 *Pro Tips:*
-- Civilians: Don’t be too obvious about the location.
-- Spy: Ask vague but smart questions.
-- Everyone: Keep the conversation going. Silence is suspicious!
-
-Good luck, Agent. Your mission starts soon. 🎩""",
+Use /newgame to start your first mission!""",
         parse_mode='Markdown'
     )
 
 def modes(update: Update, context: CallbackContext):
-    modes_text = "🎮 *Available Game Modes:*\n\n"
+    """List available game modes"""
+    modes_list = []
+    for mode_id, mode in GAME_MODES.items():
+        modes_list.append(
+            f"• {mode['name']}\n"
+            f"  {mode['description']}\n"
+            f"  ⏱ Discussion: {format_time(mode['discussion_time'])}\n"
+            f"  👥 Min players: {mode['min_players']}"
+        )
     
-    for mode_key, mode_data in GAME_MODES.items():
-        modes_text += f"{mode_data['name']}\n"
-        modes_text += f"⏱️ Discussion: {mode_data['discussion_time']//60} min\n"
-        modes_text += f"📝 {mode_data['description']}\n\n"
-    
-    modes_text += "Use /newgame to select a mode and start playing!"
-    
-    update.message.reply_text(modes_text, parse_mode='Markdown')
+    update.message.reply_text(
+        "🎮 *Available Game Modes:*\n\n" + "\n\n".join(modes_list) +
+        "\n\nUse /newgame to select a mode and start playing!",
+        parse_mode='Markdown'
+    )
 
 def newgame(update: Update, context: CallbackContext):
+    """Start a new game"""
     chat_id = update.message.chat_id
-    if chat_id in games:
-        update.message.reply_text("⚠️ A game is already in progress. Use /endgame to end it before starting a new one.")
+    user = update.effective_user
+    
+    if game_state.get_game(chat_id):
+        update.message.reply_text("⚠️ Game already in progress. Use /endgame first.")
         return
     
-    games[chat_id] = {
-        'players': {}, 
-        'state': 'mode_select', 
+    game_data = {
+        'players': {},
+        'state': 'mode_select',
         'mode': None,
-        'location': None, 
-        'spy': None, 
+        'location': None,
+        'spy': None,
         'double_agent': None,
-        'votes': {}, 
-        'timers': [],
+        'votes': {},
+        'host': user.id,
+        'created_at': datetime.now().isoformat(),
         'awaiting_guess': False
     }
     
-    # Create mode selection keyboard
+    game_state.add_game(chat_id, game_data)
+    
     keyboard = [
-        [InlineKeyboardButton(mode_data['name'], callback_data=f"mode:{mode_key}")]
-        for mode_key, mode_data in GAME_MODES.items()
+        [InlineKeyboardButton(mode['name'], callback_data=f"mode:{mode_id}")]
+        for mode_id, mode in GAME_MODES.items()
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     update.message.reply_text(
-        "🎮 *Select Game Mode:*\n\n" + 
-        "\n".join([f"{data['name']}: {data['description']}" for data in GAME_MODES.values()]),
+        "🎮 *Select Game Mode:*",
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
 
 def join(update: Update, context: CallbackContext):
+    """Join current game"""
     chat_id = update.message.chat_id
     user = update.effective_user
-    game = games.get(chat_id)
-
+    game = game_state.get_game(chat_id)
+    
     if not game:
         update.message.reply_text("❌ No active game. Use /newgame to start one.")
         return
+    
     if game['state'] != 'waiting':
         update.message.reply_text("⛔ Game already started.")
         return
+    
     if user.id in game['players']:
         update.message.reply_text("⚠️ You already joined.")
         return
-
+    
     game['players'][user.id] = user.first_name
     update.message.reply_text(f"✅ {user.first_name} joined the game!")
+    
+    # Update player count
+    player_count = len(game['players'])
+    min_players = GAME_MODES.get(game.get('mode', 'normal'), {}).get('min_players', 3)
+    if player_count >= min_players:
+        update.message.reply_text(
+            f"👥 Enough players joined! Host can /begin the game now.",
+            reply_to_message_id=update.message.message_id
+        )
 
 def leave(update: Update, context: CallbackContext):
+    """Leave current game"""
     chat_id = update.message.chat_id
     user = update.effective_user
-    game = games.get(chat_id)
-
-    if game and user.id in game['players']:
-        del game['players'][user.id]
-        update.message.reply_text(f"👋 {user.first_name} left the game.")
-    else:
-        update.message.reply_text("⚠️ You’re not in the game.")
+    game = game_state.get_game(chat_id)
+    
+    if not game:
+        update.message.reply_text("⚠️ No game to leave.")
+        return
+    
+    if user.id not in game['players']:
+        update.message.reply_text("⚠️ You're not in the game.")
+        return
+    
+    if game['state'] != 'waiting':
+        update.message.reply_text("⚠️ Cannot leave after game started.")
+        return
+    
+    del game['players'][user.id]
+    update.message.reply_text(f"👋 {user.first_name} left the game.")
+    
+    # Check if host left
+    if user.id == game['host'] and game['players']:
+        new_host = next(iter(game['players']))
+        game['host'] = new_host
+        update.message.reply_text(
+            f"👑 {game['players'][new_host]} is now the host.",
+            reply_to_message_id=update.message.message_id
+        )
+    elif not game['players']:
+        game_state.remove_game(chat_id)
+        update.message.reply_text("🛑 Game closed due to no players.")
 
 def players(update: Update, context: CallbackContext):
+    """List current players"""
     chat_id = update.message.chat_id
-    game = games.get(chat_id)
+    game = game_state.get_game(chat_id)
+    
     if not game:
         update.message.reply_text("❌ No game in progress.")
         return
+    
     if not game['players']:
-        update.message.reply_text("👥 No players have joined yet.")
+        update.message.reply_text("👥 No players yet.")
         return
-    names = list(game['players'].values())
-    update.message.reply_text("👥 *Players:*\n" + "\n".join(names), parse_mode='Markdown')
+    
+    player_list = [f"• {name}" for name in game['players'].values()]
+    host_marker = lambda uid: " 👑" if uid == game['host'] else ""
+    player_list = [
+        f"• {name}{host_marker(uid)}"
+        for uid, name in game['players'].items()
+    ]
+    
+    mode_info = GAME_MODES.get(game.get('mode', 'normal'), {})
+    min_players = mode_info.get('min_players', 3)
+    player_count = len(game['players'])
+    
+    update.message.reply_text(
+        f"👥 *Players ({player_count}/{min_players}):*\n" + "\n".join(player_list) +
+        (f"\n\n✅ Ready to /begin!" if player_count >= min_players else ""),
+        parse_mode='Markdown'
+    )    
 
 def begin(update: Update, context: CallbackContext):
+    """Start the game"""
     chat_id = update.message.chat_id
-    game = games.get(chat_id)
-
+    user = update.effective_user
+    game = game_state.get_game(chat_id)
+    
     if not game or game['state'] != 'waiting':
         update.message.reply_text("⚠️ No game to begin.")
         return
-
-    players = list(game['players'].keys())
-    if len(players) < 3:
-        update.message.reply_text("🚨 At least 3 players needed.")
+    
+    if user.id != game['host']:
+        update.message.reply_text("⛔ Only the host can start the game.")
         return
-
-    location = random.choice(locations)
+    
+    mode_config = GAME_MODES.get(game['mode'], GAME_MODES['normal'])
+    min_players = mode_config['min_players']
+    
+    if len(game['players']) < min_players:
+        update.message.reply_text(f"🚨 Need at least {min_players} players.")
+        return
+    
+    # Select location and assign roles
+    game['location'] = get_random_location()
     game['state'] = 'started'
-    game['location'] = location
     game['votes'] = {}
     game['awaiting_guess'] = False
-
-    # Clear any existing timers
-    for timer in game['timers']:
-        timer.cancel()
-    game['timers'] = []
     
-    # Get mode configuration
-    mode_config = GAME_MODES[game['mode']]
-    discussion_time = mode_config['discussion_time']
-
-    # Handle special modes
+    players = list(game['players'].keys())
+    
+    # Handle special game modes
     if mode_config['special'] == 'two_spies':
-        if len(players) < 6:
-            update.message.reply_text("🚨 Team Spy mode needs at least 6 players.")
-            return
-        spies = random.sample(players, 2)
-        game['spy'] = spies
-        
-        # Send messages for two spies
+        game['spy'] = random.sample(players, 2)
         for uid in players:
-            if uid in spies:
-                other_spy = [s for s in spies if s != uid][0]
-                other_name = game['players'][other_spy]
-                context.bot.send_message(uid, f"🕵️ You are a SPY! Your partner is {other_name}. Work together!")
+            if uid in game['spy']:
+                partner = next(s for s in game['spy'] if s != uid)
+                context.bot.send_message(
+                    uid,
+                    f"🕵️ You are a SPY!\nYour partner is {game['players'][partner]}.",
+                    parse_mode='Markdown'
+                )
             else:
-                context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
+                context.bot.send_message(
+                    uid,
+                    f"🧭 You are a civilian.\nLocation: *{game['location']}*",
+                    parse_mode='Markdown'
+                )
     
     elif mode_config['special'] == 'double_agent':
-        spy = random.choice(players)
-        remaining = [p for p in players if p != spy]
-        double_agent = random.choice(remaining)
-        fake_location = random.choice([loc for loc in locations if loc != location])
-        
-        game['spy'] = spy
-        game['double_agent'] = double_agent
-        
-        # Send messages for double agent mode
-        for uid in players:
-            if uid == spy:
-                context.bot.send_message(uid, "🕵️ You are the SPY! Try to blend in and guess the location.")
-            elif uid == double_agent:
-                context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{fake_location}* ❌", parse_mode='Markdown')
-            else:
-                context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
-
-    else:
-        # Normal mode (existing code)
-        spy = random.choice(players)
-        game['spy'] = spy
+        game['spy'] = random.choice(players)
+        remaining = [p for p in players if p != game['spy']]
+        game['double_agent'] = random.choice(remaining)
+        fake_location = get_random_location()
         
         for uid in players:
-            if uid == spy:
-                context.bot.send_message(uid, "🕵️ You are the SPY! Try to blend in and guess the location.")
+            if uid == game['spy']:
+                context.bot.send_message(uid, "🕵️ You are the SPY!")
+            elif uid == game['double_agent']:
+                context.bot.send_message(
+                    uid,
+                    f"🧭 You are a civilian.\nLocation: *{fake_location}* ❌",
+                    parse_mode='Markdown'
+                )
             else:
-                context.bot.send_message(uid, f"🧭 You are a civilian.\nLocation: *{location}*", parse_mode='Markdown')
-
-    update.message.reply_text(f"🎮 *{mode_config['name']} started!* Discuss for {discussion_time//60} minutes.", parse_mode='Markdown')
-
-    def trigger_vote():
-        if chat_id in games:
-            context.bot.send_message(chat_id, "🗳️ Time's up! Voting begins now.")
+                context.bot.send_message(
+                    uid,
+                    f"🧭 You are a civilian.\nLocation: *{game['location']}*",
+                    parse_mode='Markdown'
+                )
+    
+    elif mode_config['special'] == 'chaos':
+        spy_count = max(2, len(players) // 3)
+        game['spy'] = random.sample(players, spy_count)
+        remaining = [p for p in players if p not in game['spy']]
+        da_count = max(1, len(remaining) // 3)
+        game['double_agent'] = random.sample(remaining, da_count)
+        
+        for uid in players:
+            if uid in game['spy']:
+                partners = [s for s in game['spy'] if s != uid]
+                partners_names = ", ".join(game['players'][p] for p in partners)
+                context.bot.send_message(
+                    uid,
+                    f"🕵️ You are a SPY!\nPartners: {partners_names}",
+                    parse_mode='Markdown'
+                )
+            elif uid in game['double_agent']:
+                fake_location = get_random_location()
+                context.bot.send_message(
+                    uid,
+                    f"🧭 You are a civilian.\nLocation: *{fake_location}* ❌",
+                    parse_mode='Markdown'
+                )
+            else:
+                context.bot.send_message(
+                    uid,
+                    f"🧭 You are a civilian.\nLocation: *{game['location']}*",
+                    parse_mode='Markdown'
+                )
+    
+    else:  # Normal mode
+        game['spy'] = random.choice(players)
+        for uid in players:
+            if uid == game['spy']:
+                context.bot.send_message(uid, "🕵️ You are the SPY!")
+            else:
+                context.bot.send_message(
+                    uid,
+                    f"🧭 You are a civilian.\nLocation: *{game['location']}*",
+                    parse_mode='Markdown'
+                )
+    
+    # Start discussion timer
+    discussion_time = mode_config['discussion_time']
+    update.message.reply_text(
+        f"🎮 *{mode_config['name']} started!*\n"
+        f"Discuss for {format_time(discussion_time)}.\n"
+        f"Use /vote when ready or wait for timer.",
+        parse_mode='Markdown'
+    )
+    
+    def start_voting_wrapper():
+        if game_state.get_game(chat_id):
+            context.bot.send_message(
+                chat_id,
+                "⏰ Discussion time over! Starting voting...",
+                parse_mode='Markdown'
+            )
             start_voting(chat_id, context)
-
-    timer = Timer(discussion_time, trigger_vote)
+    
+    timer = Timer(discussion_time, start_voting_wrapper)
     timer.start()
-    game['timers'].append(timer)
+    game_state.add_timer(chat_id, timer)
 
 def location_command(update: Update, context: CallbackContext):
+    """Send location info to player"""
     chat_id = update.message.chat_id
     user_id = update.effective_user.id
-    game = games.get(chat_id)
-
+    game = game_state.get_game(chat_id)
+    
     if not game or game['state'] != 'started':
-        update.message.reply_text("❌ Game hasn’t started yet.")
+        update.message.reply_text("❌ Game hasn't started yet.")
         return
     
-    # Always send public confirmation message
-    update.message.reply_text("📬 Location information has been sent to you privately.")
-
-    if user_id == game['spy']:
-        context.bot.send_message(chat_id=user_id, text="🤫 You are the SPY. No location for you.")
-    elif user_id in game['players']:
-        context.bot.send_message(chat_id=user_id, text=f"📍 Location: *{game['location']}*", parse_mode='Markdown')
+    if user_id not in game['players']:
+        update.message.reply_text("⚠️ You're not in the game.")
+        return
+    
+    # Public response
+    update.message.reply_text("📬 Check your private messages for your role info.")
+    
+    # Private message with role info
+    if isinstance(game['spy'], list) and user_id in game['spy']:
+        partners = [s for s in game['spy'] if s != user_id]
+        partners_names = ", ".join(game['players'][p] for p in partners)
+        context.bot.send_message(
+            user_id,
+            f"🕵️ You are a SPY!\nPartners: {partners_names}",
+            parse_mode='Markdown'
+        )
+    elif user_id == game.get('spy'):
+        context.bot.send_message(user_id, "🕵️ You are the SPY!")
+    elif user_id in game.get('double_agent', []):
+        fake_location = get_random_location()
+        context.bot.send_message(
+            user_id,
+            f"🧭 You are a civilian.\nLocation: *{fake_location}*",
+            parse_mode='Markdown'
+        )
     else:
-        update.message.reply_text("⚠️ You’re not in the game.")
+        context.bot.send_message(
+            user_id,
+            f"🧭 You are a civilian.\nLocation: *{game['location']}*",
+            parse_mode='Markdown'
+        )
 
 def vote(update: Update, context: CallbackContext):
+    """Start voting process"""
     chat_id = update.message.chat_id
-    start_voting(chat_id, context)
+    game = game_state.get_game(chat_id)
     
-def start_voting(chat_id, context):
-    game = games.get(chat_id)
     if not game or game['state'] != 'started':
-        context.bot.send_message(chat_id, "❌ No game in progress or game has not started yet.")
+        update.message.reply_text("❌ Voting not available now.")
         return
     
-    game['votes'] = {}  # Reset votes
+    # Cancel discussion timer if voting started manually
+    cancel_timers(chat_id)
+    start_voting(chat_id, context)
+
+def start_voting(chat_id: int, context: CallbackContext):
+    """Initiate voting phase"""
+    game = game_state.get_game(chat_id)
+    if not game or game['state'] != 'started':
+        return
+    
+    game['votes'] = {}
+    
+    # Create voting buttons
     keyboard = [
         [InlineKeyboardButton(name, callback_data=f"vote:{uid}")]
         for uid, name in game['players'].items()
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
     context.bot.send_message(
         chat_id,
-        "🗳 *Who do you think is the spy?*\nVote by tapping on a name below.", 
-        reply_markup=reply_markup, 
+        "🗳 *Who is the spy?*\nVote by selecting a player below:",
+        reply_markup=reply_markup,
         parse_mode='Markdown'
     )
-
-    #Get voting time from mode config
-    mode_config = GAME_MODES[game['mode']]
+    
+    # Set voting timer
+    mode_config = GAME_MODES.get(game['mode'], GAME_MODES['normal'])
     voting_time = mode_config['voting_time']
-
-    def timeout_vote():
-        if chat_id not in games:  # Check if game still exists
-            context.bot.send_message(chat_id, "⏰ Voting time is up!")
+    
+    def voting_timeout():
+        if game_state.get_game(chat_id):
+            context.bot.send_message(chat_id, "⏰ Voting time over!")
             finish_vote(chat_id, context)
-
-    def vote_progress():
-        if chat_id in games:
-            current = len(games[chat_id]['votes'])
-            total = len(games[chat_id]['players'])
-            if current < total:
-                context.bot.send_message(chat_id, f"📥 {current}/{total} votes submitted...")
-
-    vote_timer = Timer(voting_time, timeout_vote)
-    progress_timer = Timer(30, vote_progress)
+    
+    def voting_progress():
+        if game_state.get_game(chat_id):
+            votes_received = len(game['votes'])
+            total_players = len(game['players'])
+            if votes_received < total_players:
+                context.bot.send_message(
+                    chat_id,
+                    f"📥 Votes received: {votes_received}/{total_players}",
+                    parse_mode='Markdown'
+                )
+    
+    vote_timer = Timer(voting_time, voting_timeout)
+    progress_timer = Timer(voting_time/2, voting_progress)
     
     vote_timer.start()
     progress_timer.start()
     
-    game['timers'].extend([vote_timer, progress_timer])  # Check progress every 10 seconds
+    game_state.add_timer(chat_id, vote_timer)
+    game_state.add_timer(chat_id, progress_timer)
 
 def vote_callback(update: Update, context: CallbackContext):
+    """Handle vote button presses"""
     query = update.callback_query
     user_id = query.from_user.id
     chat_id = query.message.chat_id
-    game = games.get(chat_id)
-
-    if not game or user_id not in game['players']:
-        query.answer("You’re not in the game.")
+    game = game_state.get_game(chat_id)
+    
+    if not game or game['state'] != 'started':
+        query.answer("Voting not active.")
         return
-
+    
+    if user_id not in game['players']:
+        query.answer("You're not in this game.")
+        return
+    
+    if user_id in game['votes']:
+        query.answer("You already voted!")
+        return
+    
     voted_id = int(query.data.split(":")[1])
     game['votes'][user_id] = voted_id
-    voted_name = game['players'].get(voted_id, 'Unknown')
+    voted_name = game['players'].get(voted_id, "Unknown")
+    
     query.answer(f"Voted for {voted_name}")
-
+    
+    # Check if all votes are in
     if len(game['votes']) == len(game['players']):
         finish_vote(chat_id, context)
 
 def mode_callback(update: Update, context: CallbackContext):
+    """Handle game mode selection"""
     query = update.callback_query
     chat_id = query.message.chat_id
-    game = games.get(chat_id)
+    game = game_state.get_game(chat_id)
     
     if not game or game['state'] != 'mode_select':
-        query.answer("Invalid game state.")
+        query.answer("Invalid selection.")
         return
     
-    mode = query.data.split(":")[1]
-    game['mode'] = mode
+    mode_id = query.data.split(":")[1]
+    if mode_id not in GAME_MODES:
+        query.answer("Invalid mode.")
+        return
+    
+    game['mode'] = mode_id
     game['state'] = 'waiting'
     
-    mode_info = GAME_MODES[mode]
+    mode_info = GAME_MODES[mode_id]
+    min_players = mode_info['min_players']
+    
     query.answer(f"Selected: {mode_info['name']}")
     
     context.bot.edit_message_text(
-        text=f"✅ *{mode_info['name']} Selected!*\n{mode_info['description']}\n\nPlayers, use /join to participate.",
+        text=f"✅ *{mode_info['name']} selected!*\n"
+             f"{mode_info['description']}\n"
+             f"👥 Minimum players: {min_players}\n\n"
+             f"Players, use /join to participate.",
         chat_id=chat_id,
         message_id=query.message.message_id,
         parse_mode='Markdown'
     )
 
-def finish_vote(chat_id, context):
-    game = games.get(chat_id)
+def finish_vote(chat_id: int, context: CallbackContext):
+    """Process voting results"""
+    game = game_state.get_game(chat_id)
     if not game:
         return
-   
+    
     # Cancel any remaining timers
-    for timer in game['timers']:
-        timer.cancel()
-    game['timers'] = []
-
+    cancel_timers(chat_id)
+    
     votes = game['votes']
     if not votes:
-        context.bot.send_message(chat_id, "❌ No votes received. Game ended.")
-        del games[chat_id]
+        context.bot.send_message(chat_id, "❌ No votes received. Game aborted.")
+        game_state.remove_game(chat_id)
         return
     
-    counts = {}
-    for voter, voted in votes.items():
-        counts[voted] = counts.get(voted, 0) + 1
-
+    # Count votes
+    vote_counts = {}
+    for voted_id in votes.values():
+        vote_counts[voted_id] = vote_counts.get(voted_id, 0) + 1
+    
     # Prepare vote breakdown
-    breakdown = "🗳️ *Voting Result:*\n"
+    breakdown = "🗳️ *Voting Results:*\n"
     for voter_id, voted_id in votes.items():
-        voter_name = game['players'].get(voter_id, 'Unknown')
-        voted_name = game['players'].get(voted_id, 'Unknown')
-        breakdown += f"- {voter_name} voted for {voted_name}\n"
-
-    # Detect highest voted
-    max_votes = max(counts.values())
-    top_voted = [uid for uid, c in counts.items() if c == max_votes]
-
-    # Tie case
+        voter_name = game['players'].get(voter_id, "Unknown")
+        voted_name = game['players'].get(voted_id, "Unknown")
+        breakdown += f"- {voter_name} → {voted_name}\n"
+    
+    # Determine who was voted out
+    max_votes = max(vote_counts.values())
+    top_voted = [uid for uid, count in vote_counts.items() if count == max_votes]
+    
     if len(top_voted) > 1:
+        # Tie - randomly select one
         chosen = random.choice(top_voted)
-        tie_msg = "⚠️ There was a tie! Randomly selecting one among them..."
-        context.bot.send_message(chat_id, tie_msg)
+        context.bot.send_message(chat_id, "⚠️ Voting tie! Randomly selecting one...")
     else:
         chosen = top_voted[0]
-
-    name = game['players'].get(chosen, 'Unknown')
-    context.bot.send_message(chat_id, breakdown, parse_mode='Markdown')
-
-    # Update statistics for voting
-    for voter_id in game['votes']:
-        if voter_id not in player_stats:
-            player_stats[voter_id] = {
-                'games_played': 0, 'spy_wins': 0, 'civilian_wins': 0,
-                'spy_games': 0, 'civilian_games': 0, 'spies_caught': 0,
-                'achievements': [], 'name': game['players'].get(voter_id, 'Unknown')
-            }
     
-        # Check if they caught the spy
-        if isinstance(game['spy'], list):  #Team Spy mode
-            if game['votes'][voter_id] in game['spy']:
-                player_stats[voter_id]['spies_caught'] += 1
+    chosen_name = game['players'].get(chosen, "Unknown")
+    context.bot.send_message(chat_id, breakdown, parse_mode='Markdown')
+    
+    # Update statistics for voters
+    for voter_id in votes:
+        if voter_id not in game_state.player_stats:
+            game_state.player_stats[voter_id] = create_player_stats(game['players'][voter_id])
+        
+        # Check if they caught a spy
+        if isinstance(game['spy'], list):
+            if votes[voter_id] in game['spy']:
+                game_state.player_stats[voter_id]['spies_caught'] += 1
         else:
-            if game['votes'][voter_id] == game['spy']:
-                player_stats[voter_id]['spies_caught'] += 1
-
-    # Handle special mode win conditions
-    mode_config = GAME_MODES[game['mode']]
+            if votes[voter_id] == game['spy']:
+                game_state.player_stats[voter_id]['spies_caught'] += 1
+    
+    # Handle special modes
+    mode_config = GAME_MODES.get(game['mode'], GAME_MODES['normal'])
     
     if mode_config['special'] == 'team_spy':
-        if chosen in game['spy']:  # One spy caught
-            msg = f"✅ {name} was a spy! But their partner is still hidden..."
-            context.bot.send_message(chat_id=chat_id, text=msg)
-            # Remove caught spy and continue
+        if chosen in game['spy']:
+            # Remove caught spy
             game['spy'] = [s for s in game['spy'] if s != chosen]
             del game['players'][chosen]
-            if len(game['spy']) == 0:
+            
+            if not game['spy']:
+                # All spies caught
                 context.bot.send_message(chat_id, "🎉 All spies caught! Civilians win!")
                 end_game(chat_id, 'civilian_win')
             else:
-                # Start another voting round
+                # Continue with remaining spies
+                remaining_spies = ", ".join(game['players'][s] for s in game['spy'])
+                context.bot.send_message(
+                    chat_id,
+                    f"✅ {chosen_name} was a spy! Remaining spies: {remaining_spies}",
+                    parse_mode='Markdown'
+                )
                 start_voting(chat_id, context)
-            return
         else:
-            msg = f"❌ {name} was innocent. The spies were {[game['players'].get(s, 'unknown') for s in game['spy']]}. Spy wins!"
-            context.bot.send_message(chat_id=chat_id, text=msg)
+            # Innocent voted out
+            spies = ", ".join(game['players'][s] for s in game['spy'])
+            context.bot.send_message(
+                chat_id,
+                f"❌ {chosen_name} was innocent. Spies were: {spies}",
+                parse_mode='Markdown'
+            )
             end_game(chat_id, 'spy_win')
-            return
-        
-    elif mode_config['special'] == 'double_agent':
-        if chosen == game['spy']:
-            msg = f"✅ {name} was the real spy! But the double agent is still among you..."
-            context.bot.send_message(chat_id=chat_id, text=msg)
-            context.bot.send_message(chat_id,  "🎉 Civilians win!")
+    
+    elif mode_config['special'] in ['double_agent', 'chaos']:
+        if chosen == game.get('spy'):
+            # Real spy caught
+            context.bot.send_message(
+                chat_id,
+                f"✅ {chosen_name} was the real spy! Civilians win!",
+                parse_mode='Markdown'
+            )
             end_game(chat_id, 'civilian_win')
-            return
-        elif chosen == game['double_agent']:
-            msg = f"❌ {name} was the double agent, but the real spy escaped! Spy wins!"
-            spy_name = game['players'].get(game['spy'], 'Unknown')
-            context.bot.send_message(chat_id=chat_id, text=msg + f" The real spy was {spy_name}.")
+        elif chosen in game.get('double_agent', []):
+            # Double agent caught
+            spy_name = game['players'].get(game['spy'], "Unknown")
+            context.bot.send_message(
+                chat_id,
+                f"❌ {chosen_name} was a double agent! Real spy {spy_name} wins!",
+                parse_mode='Markdown'
+            )
             end_game(chat_id, 'spy_win')
-            return
-        else:                
-            msg = f"❌ {name} was innocent. Spy wins!"
-            spy_name = game['players'].get(game['spy'], 'Unknown')
-            da_name = game['players'].get(game['double_agent'], 'Unknown')
-            context.bot.send_message(chat_id=chat_id, text=msg + f" The spy was {spy_name} and double agent was {da_name}.")
+        else:
+            # Innocent voted out
+            spy_name = game['players'].get(game['spy'], "Unknown")
+            da_names = ", ".join(game['players'][da] for da in game.get('double_agent', []))
+            context.bot.send_message(
+                chat_id,
+                f"❌ {chosen_name} was innocent.\n"
+                f"Spy: {spy_name}\n"
+                f"Double agents: {da_names or 'None'}",
+                parse_mode='Markdown'
+            )
             end_game(chat_id, 'spy_win')
-            return
-        
-    # Normal mode handling
-    if chosen == game['spy']:
-        msg = f"✅ {name} was the spy and was caught! Civilians win! 🎉"
-        context.bot.send_message(chat_id=chat_id, text=msg)
-        end_game(chat_id, 'civilian_win')
-    else:
-        spy_name = game['players'].get(game['spy'], 'Unknown')
-        msg = f"❌ {name} was innocent. The spy was {spy_name}."
-        context.bot.send_message(chat_id=chat_id, text=msg)
-        
-        # Spy gets to guess
-        spy = game['spy']
-        context.bot.send_message(spy, "🕵️ You've survived! Now guess the location! You have 30 seconds. Reply with your guess.")
-        game['awaiting_guess'] = True
-
-        def timeout_guess():
-            if chat_id in games and games[chat_id].get('awaiting_guess'):
-                context.bot.send_message(chat_id, "⏰ Spy failed to guess in time. Civilians win!")
-                end_game(chat_id, 'civilian_win')
-
-        guess_time = GAME_MODES[game['mode']]['guess_time']
-        guess_timer = Timer(guess_time, timeout_guess)
-        guess_timer.start()
-        game['timers'].append(guess_timer)
-
-# Spy guess handler
+    
+    else:  # Normal mode
+        if chosen == game['spy']:
+            # Spy caught
+            context.bot.send_message(
+                chat_id,
+                f"✅ {chosen_name} was the spy! Civilians win! 🎉",
+                parse_mode='Markdown'
+            )
+            end_game(chat_id, 'civilian_win')
+        else:
+            # Innocent voted out
+            spy_name = game['players'].get(game['spy'], "Unknown")
+            context.bot.send_message(
+                chat_id,
+                f"❌ {chosen_name} was innocent. The spy was {spy_name}!",
+                parse_mode='Markdown'
+            )
+            
+            # Spy gets to guess
+            game['awaiting_guess'] = True
+            context.bot.send_message(
+                game['spy'],
+                "🕵️ You survived! Guess the location (reply here):",
+                parse_mode='Markdown'
+            )
+            
+            # Set guess timer
+            guess_time = mode_config['guess_time']
+            
+            def guess_timeout():
+                if game_state.get_game(chat_id) and game['awaiting_guess']:
+                    context.bot.send_message(
+                        chat_id,
+                        "⏰ Spy failed to guess in time. Civilians win!",
+                        parse_mode='Markdown'
+                    )
+                    end_game(chat_id, 'civilian_win')
+            
+            timer = Timer(guess_time, guess_timeout)
+            timer.start()
+            game_state.add_timer(chat_id, timer)
 
 def handle_guess(update: Update, context: CallbackContext):
+    """Process spy's location guess"""
     chat_id = update.message.chat_id
     user_id = update.effective_user.id
-    game = games.get(chat_id)
-
-    if not game or not game.get('awaiting_guess') or user_id != game['spy']:
+    game = game_state.get_game(chat_id)
+    
+    if not game or not game['awaiting_guess'] or user_id != game.get('spy'):
         return
-
+    
     guess = update.message.text.strip().lower()
     correct = game['location'].lower()
-
-    # Cancel guess timer
-    for timer in game['timers']:
-        timer.cancel()
-    game['timers'] = []
     
+    # Cancel guess timer
+    cancel_timers(chat_id)
+    game['awaiting_guess'] = False
+    
+    # Check guess
     if guess == correct:
-        context.bot.send_message(chat_id, f"🎉 The spy guessed correctly ({guess}) and wins!")
+        context.bot.send_message(
+            chat_id,
+            f"🎉 The spy guessed correctly! Location was *{game['location']}*. Spy wins!",
+            parse_mode='Markdown'
+        )
         end_game(chat_id, 'spy_win')
     else:
-        context.bot.send_message(chat_id, f"❌ The spy guessed {guess}, but the real location was '{game['location']}'. Civilians win!")
+        context.bot.send_message(
+            chat_id,
+            f"❌ Spy guessed '{guess}'. Correct was *{game['location']}*. Civilians win!",
+            parse_mode='Markdown'
+        )
         end_game(chat_id, 'civilian_win')
 
-def end_game(chat_id, result):
-    game = games.get(chat_id)
+def end_game(chat_id: int, result: str):
+    """Finalize game and update statistics"""
+    game = game_state.get_game(chat_id)
     if not game:
         return
     
-    # Update player statistics
+    # Update stats for all players
     for player_id in game['players']:
-        was_spy = (player_id == game['spy'] or 
-                  (isinstance(game['spy'], list) and player_id in game['spy']))
+        was_spy = (
+            player_id == game.get('spy') or 
+            (isinstance(game.get('spy'), list) and player_id in game['spy'])
+        )
         update_player_stats(player_id, game['players'][player_id], result, was_spy)
     
-    # Cancel all timers
-    for timer in game['timers']:
-        timer.cancel()
-    
-    del games[chat_id]
+    # Clean up
+    game_state.remove_game(chat_id)
 
 def endgame(update: Update, context: CallbackContext):
+    """Manually end current game"""
     chat_id = update.message.chat_id
-    if chat_id in games:
-        #cancel any active timers
-        game = games[chat_id]
-        for timer in game.get('timers', []):
-            timer.cancel()
-        del games[chat_id]
-        update.message.reply_text("🛑 Game ended.")
-    else:
+    user = update.effective_user
+    game = game_state.get_game(chat_id)
+    
+    if not game:
         update.message.reply_text("❌ No game to end.")
-
-def test_command(update: Update, context: CallbackContext):
-    print("TEST COMMAND TRIGGERED")
-    update.message.reply_text("✅ Test working!")
-
-def show_stats(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    stats = player_stats.get(user_id, {})
-    if not stats:
-        update.message.reply_text("📊 No games played yet! Join a game to start building your stats.")
         return
     
-    games_played = stats.get('games_played', 0)
-    spy_wins = stats.get('spy_wins', 0)
-    civilian_wins = stats.get('civilian_wins', 0)
-    spy_games = stats.get('spy_games', 0)
-    civilian_games = stats.get('civilian_games', 0)
-    spies_caught = stats.get('spies_caught', 0)
+    if user.id != game['host'] and not is_admin(user.id):
+        update.message.reply_text("⛔ Only host or admin can end game.")
+        return
     
-    spy_win_rate = (spy_wins / spy_games * 100) if spy_games > 0 else 0
-    civilian_win_rate = (civilian_wins / civilian_games * 100) if civilian_games > 0 else 0
-    
-    stats_text = f"""📊 *Your Statistics:*
-    
-🎮 Games Played: {games_played}
-🕵️ Times as Spy: {spy_games}
-👥 Times as Civilian: {civilian_games}
+    game_state.remove_game(chat_id)
+    update.message.reply_text("🛑 Game ended by host.")
 
-🏆 *Win Rates:*
-🕵️ Spy Success: {spy_win_rate:.1f}% ({spy_wins}/{spy_games})
-👥 Civilian Success: {civilian_win_rate:.1f}% ({civilian_wins}/{civilian_games})
-🎯 Spies Caught: {spies_caught}
+def show_stats(update: Update, context: CallbackContext):
+    """Display player statistics"""
+    user_id = update.effective_user.id
+    stats = game_state.player_stats.get(user_id, {})
+    
+    if not stats:
+        update.message.reply_text("📊 No games played yet!")
+        return
+    
+    # Calculate win rates
+    spy_win_rate = (stats['spy_wins'] / stats['spy_games'] * 100) if stats['spy_games'] > 0 else 0
+    civilian_win_rate = (stats['civilian_wins'] / stats['civilian_games'] * 100) if stats['civilian_games'] > 0 else 0
+    
+    stats_text = f"""📊 *{stats['name']}'s Stats:*
 
-🏅 Achievements: {len(stats.get('achievements', []))}"""
+🎮 Games Played: {stats['games_played']}
+🕵️ Spy Games: {stats['spy_games']} ({spy_win_rate:.1f}% win rate)
+👥 Civilian Games: {stats['civilian_games']} ({civilian_win_rate:.1f}% win rate)
+🎯 Spies Caught: {stats['spies_caught']}
+
+🏅 Achievements: {len(stats['achievements'])}/{len(ACHIEVEMENTS)}"""
     
     update.message.reply_text(stats_text, parse_mode='Markdown')
+    
+    # Show unlocked achievements if any
+    if stats['achievements']:
+        achievements_text = "🏅 *Your Achievements:*\n" + "\n".join(
+            f"• {ach}" for ach in stats['achievements']
+        )
+        update.message.reply_text(achievements_text, parse_mode='Markdown')
 
 def show_leaderboard(update: Update, context: CallbackContext):
-    if not player_stats:
+    """Display leaderboard"""
+    if not game_state.player_stats:
         update.message.reply_text("📊 No stats available yet!")
         return
     
-    # Sort players by various metrics
-    spy_masters = sorted(player_stats.items(), key=lambda x: x[1].get('spy_wins', 0), reverse=True)[:5]
-    detectives = sorted(player_stats.items(), key=lambda x: x[1].get('spies_caught', 0), reverse=True)[:5]
+    # Prepare stats with calculated win rates
+    enhanced_stats = []
+    for user_id, stats in game_state.player_stats.items():
+        spy_rate = (stats['spy_wins'] / stats['spy_games'] * 100) if stats['spy_games'] > 0 else 0
+        civ_rate = (stats['civilian_wins'] / stats['civilian_games'] * 100) if stats['civilian_games'] > 0 else 0
+        enhanced_stats.append({
+            **stats,
+            'spy_win_rate': spy_rate,
+            'civilian_win_rate': civ_rate,
+            'user_id': user_id
+        })
     
-    leaderboard = "🏆 *LEADERBOARD*\n\n🕵️ *Top Spy Masters:*\n"
-    for i, (user_id, stats) in enumerate(spy_masters, 1):
-        name = stats.get('name', f'Agent {user_id}')
-        wins = stats.get('spy_wins', 0)
-        leaderboard += f"{i}. {name}: {wins} spy wins\n"
+    # Top spies by wins
+    top_spies = sorted(
+        enhanced_stats,
+        key=lambda x: (x['spy_wins'], x['spy_win_rate']),
+        reverse=True
+    )[:5]
     
-    leaderboard += "\n🎯 *Top Detectives:*\n"
-    for i, (user_id, stats) in enumerate(detectives, 1):
-        name = stats.get('name', f'Agent {user_id}')
-        caught = stats.get('spies_caught', 0)
-        leaderboard += f"{i}. {name}: {caught} spies caught\n"
+    # Top civilians by win rate (min 10 games)
+    top_civilians = sorted(
+        [s for s in enhanced_stats if s['civilian_games'] >= 10],
+        key=lambda x: (x['civilian_win_rate'], x['civilian_wins']),
+        reverse=True
+    )[:5]
+    
+    # Most games played
+    most_active = sorted(
+        enhanced_stats,
+        key=lambda x: x['games_played'],
+        reverse=True
+    )[:5]
+    
+    # Build leaderboard message
+    leaderboard = "🏆 *Leaderboard*\n\n"
+    
+    leaderboard += "🕵️ *Top Spies (Wins):*\n"
+    for i, stat in enumerate(top_spies, 1):
+        leaderboard += f"{i}. {stat['name']}: {stat['spy_wins']} wins ({stat['spy_win_rate']:.1f}%)\n"
+    
+    leaderboard += "\n👥 *Top Civilians (Win Rate):*\n"
+    for i, stat in enumerate(top_civilians, 1):
+        leaderboard += f"{i}. {stat['name']}: {stat['civilian_win_rate']:.1f}% ({stat['civilian_wins']}/{stat['civilian_games']})\n"
+    
+    leaderboard += "\n🎮 *Most Active Players:*\n"
+    for i, stat in enumerate(most_active, 1):
+        leaderboard += f"{i}. {stat['name']}: {stat['games_played']} games\n"
     
     update.message.reply_text(leaderboard, parse_mode='Markdown')
 
 def show_achievements(update: Update, context: CallbackContext):
+    """Display all achievements and player progress"""
     user_id = update.effective_user.id
-    stats = player_stats.get(user_id, {})
-    achievements = stats.get('achievements', [])
+    stats = game_state.player_stats.get(user_id, create_player_stats(update.effective_user.first_name))
     
-    if not achievements:
-        update.message.reply_text("🏅 No achievements yet! Keep playing to unlock them.")
-        return
+    achievements_text = "🏅 *Achievements List:*\n\n"
     
-    achievement_text = "🏅 *Your Achievements:*\n\n" + "\n".join([f"🎖️ {ach}" for ach in achievements])
-    update.message.reply_text(achievement_text, parse_mode='Markdown')
+    for ach_id, ach_data in ACHIEVEMENTS.items():
+        unlocked = ach_data['name'] in stats['achievements']
+        prefix = "🔓" if unlocked else "🔒"
+        achievements_text += f"{prefix} *{ach_data['name']}*"
+        
+        if not unlocked:
+            achievements_text += " (Locked)"
+        
+        achievements_text += "\n"
+    
+    update.message.reply_text(achievements_text, parse_mode='Markdown')
 
-def update_player_stats(user_id, name, result_type, was_spy):
-    if user_id not in player_stats:
-        player_stats[user_id] = {
-            'games_played': 0, 'spy_wins': 0, 'civilian_wins': 0, 
-            'spy_games': 0, 'civilian_games': 0, 'spies_caught': 0, 
-            'achievements': [], 'name': name
-        }
+def create_player_stats(name: str) -> dict:
+    """Create a new player stats dictionary"""
+    return {
+        'games_played': 0,
+        'spy_wins': 0,
+        'civilian_wins': 0,
+        'spy_games': 0,
+        'civilian_games': 0,
+        'spies_caught': 0,
+        'achievements': [],
+        'name': name,
+        'first_game': datetime.now().isoformat(),
+        'last_game': None
+    }
+
+def update_player_stats(user_id: int, name: str, result: str, was_spy: bool):
+    """Update player statistics after game"""
+    if user_id not in game_state.player_stats:
+        game_state.player_stats[user_id] = create_player_stats(name)
     
-    stats = player_stats[user_id]
+    stats = game_state.player_stats[user_id]
     stats['games_played'] += 1
+    stats['last_game'] = datetime.now().isoformat()
     stats['name'] = name  # Update name in case it changed
     
     if was_spy:
         stats['spy_games'] += 1
-        if result_type == 'spy_win':
+        if result == 'spy_win':
             stats['spy_wins'] += 1
     else:
         stats['civilian_games'] += 1
-        if result_type == 'civilian_win':
+        if result == 'civilian_win':
             stats['civilian_wins'] += 1
     
-    # Check for achievements
+    # Check for new achievements
     check_achievements(user_id, stats)
 
-def check_achievements(user_id, stats):
+
+def check_achievements(user_id: int, stats: dict):
+    """Check and unlock new achievements"""
     unlocked = set(stats['achievements'])
     new_achievements = []
     
-    # Achievement checks
-    if stats['spy_wins'] >= 5 and 'Master Spy' not in unlocked:
-        new_achievements.append('Master Spy')
-    if stats['spies_caught'] >= 10 and 'Super Detective' not in unlocked:
-        new_achievements.append('Super Detective')
-    if stats['games_played'] >= 50 and 'Veteran Agent' not in unlocked:
-        new_achievements.append('Veteran Agent')
-    if stats['spy_games'] >= 20 and 'Professional Deceiver' not in unlocked:
-        new_achievements.append('Professional Deceiver')
+    # Calculate win rates for achievement conditions
+    spy_win_rate = (stats['spy_wins'] / stats['spy_games'] * 100) if stats['spy_games'] > 0 else 0
+    civ_win_rate = (stats['civilian_wins'] / stats['civilian_games'] * 100) if stats['civilian_games'] > 0 else 0
     
+    enhanced_stats = {
+        **stats,
+        'spy_win_rate': spy_win_rate,
+        'civilian_win_rate': civ_win_rate
+    }
+    
+    # Check each achievement
+    for ach_id, ach_data in ACHIEVEMENTS.items():
+        ach_name = ach_data['name']
+        if ach_name not in unlocked and ach_data['condition'](enhanced_stats):
+            new_achievements.append(ach_name)
+    
+    # Add new achievements
+    if new_achievements:
         stats['achievements'].extend(new_achievements)
-        # You can send notification here if desired
+        # Notify player if possible
+        try:
+            message = "🏆 *New Achievement(s) Unlocked!*\n" + "\n".join(f"🎖️ {ach}" for ach in new_achievements)
+            Updater.bot.send_message(user_id, message, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Failed to notify player {user_id} of achievements: {e}")
+
+def admin_stats(update: Update, context: CallbackContext):
+    """Admin command to view bot statistics"""
+    if not is_admin(update.effective_user.id):
+        update.message.reply_text("⛔ Admin only.")
+        return
+    
+    active_games = len(game_state.games)
+    total_players = sum(len(g['players']) for g in game_state.games.values())
+    registered_players = len(game_state.player_stats)
+    
+    update.message.reply_text(
+        f"📊 *Admin Stats*\n\n"
+        f"Active Games: {active_games}\n"
+        f"Active Players: {total_players}\n"
+        f"Registered Players: {registered_players}",
+        parse_mode='Markdown'
+    )
+
+def error_handler(update: Update, context: CallbackContext):
+    """Log errors and notify admins"""
+    logger.error(f"Update {update} caused error {context.error}")
+    
+    # Notify admins
+    for admin_id in ADMIN_IDS:
+        try:
+            context.bot.send_message(
+                admin_id,
+                f"⚠️ Error occurred:\n{context.error}\n\nIn update:\n{update}",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify admin {admin_id}: {e}")
 
 # --- Main ---
 def main():
+    """Start the bot"""
     updater = Updater(TOKEN, use_context=True)
     dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("guide", guide))
-    dp.add_handler(CommandHandler("intel", intel))
-    dp.add_handler(CommandHandler("modes", modes))
-    dp.add_handler(CommandHandler("newgame", newgame))
-    dp.add_handler(CommandHandler("join", join))
-    dp.add_handler(CommandHandler("leave", leave))
-    dp.add_handler(CommandHandler("players", players))
-    dp.add_handler(CommandHandler("begin", begin))
-    dp.add_handler(CommandHandler("location", location_command))
-    dp.add_handler(CommandHandler("vote", vote))
-    dp.add_handler(CommandHandler("endgame", endgame))
-    dp.add_handler(CommandHandler("stats", show_stats))
-    dp.add_handler(CommandHandler("leaderboard", show_leaderboard))
-    dp.add_handler(CommandHandler("achievements", show_achievements))
-    dp.add_handler(CommandHandler("test", test_command))
-
+    
+    # Command handlers
+    commands = [
+        ('start', start),
+        ('guide', guide),
+        ('intel', intel),
+        ('modes', modes),
+        ('newgame', newgame),
+        ('join', join),
+        ('leave', leave),
+        ('players', players),
+        ('begin', begin),
+        ('location', location_command),
+        ('vote', vote),
+        ('endgame', endgame),
+        ('stats', show_stats),
+        ('leaderboard', show_leaderboard),
+        ('achievements', show_achievements),
+        ('adminstats', admin_stats)
+    ]
+    
+    for cmd, handler in commands:
+        dp.add_handler(CommandHandler(cmd, handler))
+    
+    # Callback handlers
     dp.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^vote:"))
     dp.add_handler(CallbackQueryHandler(mode_callback, pattern=r"^mode:"))
-
-    # Message filter should be limited to spy guess scenario
+    
+    # Message handler for spy guesses
     dp.add_handler(MessageHandler(Filters.text & Filters.private, handle_guess))
     
+    # Error handler
+    dp.add_error_handler(error_handler)
+    
+    # Start bot
     updater.start_polling()
+    logger.info("Spy Bot is now running...")
     updater.idle()
 
 if __name__ == "__main__":
