@@ -18,8 +18,6 @@ from telegram.ext import (
 
 # ---Configuration---
 load_dotenv()
-print("DEBUG - ADMIN_IDS:", os.getenv("ADMIN_IDS"))  # Check if loaded
-print("DEBUG - Your ID:", update.effective_user.id)  # In your command handler
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id]
 
@@ -1210,31 +1208,22 @@ def is_admin(user_id: int) -> bool:
     return user_id in [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id]   
 
 def admin_stats(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    update.message.reply_text(
-        f"🔍 Debug:\n"
-        f"Your ID: {user_id}\n"
-        f"ADMIN_IDS: {ADMIN_IDS}\n"
-        f"Is admin? {is_admin(user_id)}"
-    )
-
-# def admin_stats(update: Update, context: CallbackContext):
-#     """Admin command to view bot statistics"""
-#     if not is_admin(update.effective_user.id):
-#         update.message.reply_text("⛔ Admin only.")
-#         return
+    """Admin command to view bot statistics"""
+    if not is_admin(update.effective_user.id):
+        update.message.reply_text("⛔ Admin only.")
+        return
+      
+    active_games = len(game_state.games)
+    total_players = sum(len(g['players']) for g in game_state.games.values())
+    registered_players = len(game_state.player_stats)
     
-#     active_games = len(game_state.games)
-#     total_players = sum(len(g['players']) for g in game_state.games.values())
-#     registered_players = len(game_state.player_stats)
-#     
-#     update.message.reply_text(
-#         f"📊 *Admin Stats*\n\n"
-#         f"Active Games: {active_games}\n"
-#         f"Active Players: {total_players}\n"
-#         f"Registered Players: {registered_players}",
-#         parse_mode='Markdown'
-#     )
+    update.message.reply_text(
+        f"📊 *Admin Stats*\n\n"
+        f"Active Games: {active_games}\n"
+        f"Active Players: {total_players}\n"
+        f"Registered Players: {registered_players}",
+        parse_mode='Markdown'
+    )
 
 def error_handler(update: Update, context: CallbackContext):
     """Log errors and notify admins"""
