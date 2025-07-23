@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Union
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import ChatMemberAdministrator, ChatMemberOwner
 from telegram.ext import (
     Updater, CommandHandler, CallbackContext, CallbackQueryHandler,
     MessageHandler, Filters, Dispatcher
@@ -469,8 +470,24 @@ def begin(update: Update, context: CallbackContext):
         update.message.reply_text("⚠️ No game to begin.")
         return
     
-    if user.id != game['host']:
-        update.message.reply_text("⛔ Only the host can start the game.")
+    # Permission checks
+    is_bot_admin = is_admin(user.id)
+    is_host = user.id == game['host']
+    is_group_admin = False
+    
+    try:
+        if update.effective_chat.type in ['group', 'supergroup']:
+            member = context.bot.get_chat_member(chat_id, user.id)
+            is_group_admin = member.status in ['administrator', 'creator']
+    except Exception as e:
+        logger.warning(f"Failed to check admin status: {e}")
+    
+    if not (is_host or is_bot_admin or is_group_admin):
+        update.message.reply_text(
+            "⛔ Only game host (@{host}), bot admins, or group admins can start the game.".format(
+                host=game['players'].get(game['host'], "unknown")
+            )
+        )
         return
     
     mode_config = GAME_MODES.get(game['mode'], GAME_MODES['normal'])
@@ -977,13 +994,39 @@ def endgame(update: Update, context: CallbackContext):
     if not game:
         update.message.reply_text("❌ No game to end.")
         return
-    
-    if user.id != game['host'] and not is_admin(user.id):
-        update.message.reply_text("⛔ Only host or admin can end game.")
+
+    # Permission checks
+    is_bot_admin = is_admin(user.id)
+    is_host = user.id == game['host']
+    is_group_admin = False
+
+     # Check Telegram group admin status (if in group)
+    try:
+        if update.effective_chat.type in ['group', 'supergroup']:
+            member = context.bot.get_chat_member(chat_id, user.id)
+            is_group_admin = member.status in ['administrator', 'creator']
+    except Exception as e:
+        logger.warning(f"Failed to check admin status: {e}")
+
+    # Reject unauthorized users
+    if not (is_host or is_bot_admin or is_group_admin):
+        update.message.reply_text(
+            "⛔ Only game host (@{host}), bot admins, or group admins can end the game.".format(
+                host=game['players'].get(game['host'], "unknown")
+            )
+        )
         return
     
+    # Clean up game
     game_state.remove_game(chat_id)
-    update.message.reply_text("🛑 Game ended by host.")
+
+     # Success message
+    if is_host:
+        update.message.reply_text("🛑 Game ended by host.")
+    elif is_bot_admin:
+        update.message.reply_text("🛑 Game ended by bot admin.")
+    else:
+        update.message.reply_text("🛑 Game ended by group admin.")
 
 def show_stats(update: Update, context: CallbackContext):
     """Display player statistics"""
