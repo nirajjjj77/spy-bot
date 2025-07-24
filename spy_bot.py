@@ -6,9 +6,10 @@ import os
 import logging
 import random
 import time
+import hashlib
 from threading import Timer, Lock
 from datetime import datetime
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram import ChatMemberAdministrator, ChatMemberOwner
@@ -40,6 +41,7 @@ class GameState:
         self.player_stats: Dict[int, dict] = {}  # {user_id: stats}
         self.active_timers: Dict[int, List[Timer]] = {}  # {chat_id: timers}
         self.anon_cooldowns: Dict[int, float] = {}  # {user_id: last_used_time}
+        self.temp_anon_messages: Dict[str, dict] = {}
 
     def get_game(self, chat_id: int) -> Optional[dict]:
         with self.lock:
@@ -57,6 +59,12 @@ class GameState:
                 for timer in self.active_timers[chat_id]:
                     timer.cancel()
                 del self.active_timers[chat_id]
+            if hasattr(self, 'temp_anon_messages'):
+                # Clean up any temp messages for this chat
+                self.temp_anon_messages = {
+                    k: v for k, v in self.temp_anon_messages.items() 
+                    if k.split('_')[0] != str(chat_id)
+                }
 
     def add_timer(self, chat_id: int, timer: Timer):
         with self.lock:
@@ -70,6 +78,45 @@ class GameState:
                 for timer in self.active_timers[chat_id]:
                     timer.cancel()
                 self.active_timers[chat_id] = []
+
+    def cleanup_old_data(self):
+        """Clean up old temporary data"""
+        with self.lock:
+            current_time = time.time()
+        
+            # Clean old cooldowns (older than 1 hour)
+            self.anon_cooldowns = {
+                uid: timestamp for uid, timestamp in self.anon_cooldowns.items()
+                if current_time - timestamp < 3600
+            }
+        
+            # Clean old temp messages (older than 10 minutes)
+            if hasattr(self, 'temp_anon_messages'):
+                self.temp_anon_messages = {
+                    msg_id: data for msg_id, data in self.temp_anon_messages.items()
+                    if current_time - data.get('timestamp', 0) < 600
+                }
+
+    def validate_game_state(chat_id: int, required_state: str = None, user_id: int = None) -> tuple[bool, str, dict]:
+        """Comprehensive game state validation"""
+        game = game_state.get_game(chat_id)
+    
+        if not game:
+            return False, "No active game found", {}
+    
+        if required_state and game.get('state') != required_state:
+            return False, f"Game not in {required_state} state", game
+        
+        if user_id and user_id not in game.get('players', {}):
+            return False, "You're not in this game", game
+        
+        # Check for corrupted game data
+        required_keys = ['players', 'state', 'mode']
+        missing_keys = [key for key in required_keys if key not in game]
+        if missing_keys:
+            return False, f"Game data corrupted (missing: {missing_keys})", game
+        
+        return True, "Valid", game
 
 game_state = GameState()
 
@@ -131,6 +178,21 @@ GAME_MODES = {
     }
 }
 
+# Add these constants after imports
+ERROR_MESSAGES = {
+    'no_game': "❌ No active game found. Use /newgame to start one.",
+    'game_started': "⚠️ Game already started. Cannot join now.",
+    'not_in_game': "⚠️ You're not in the current game.",
+    'not_authorized': "⛔ You don't have permission to do this.",
+    'invalid_state': "❌ This action is not available in the current game state.",
+    'rate_limited': "⏳ Please wait {} seconds before trying again.",
+    'network_error': "❌ Network error occurred. Please try again.",
+}
+
+def get_error_message(key: str, *args) -> str:
+    """Get formatted error message"""
+    return ERROR_MESSAGES.get(key, "❌ An error occurred.").format(*args)
+    
 # Expanded locations database with categories
 LOCATIONS = {
     "🌆 City": [
@@ -200,8 +262,46 @@ def format_time(seconds: int) -> str:
     return f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
 
 def is_admin(user_id: int) -> bool:
-    """Check if user is admin"""
+    """Secure admin verification"""
+    if not ADMIN_IDS:
+        logger.warning("No admin IDs configured")
+        return False
+    
     return user_id in ADMIN_IDS
+
+def verify_admin_action(user_id: int, action: str) -> bool:
+    """Log and verify admin actions"""
+    if is_admin(user_id):
+        logger.info(f"Admin {user_id} performed action: {action}")
+        return True
+    else:
+        logger.warning(f"Unauthorized admin attempt by {user_id} for action: {action}")
+        return False
+
+def validate_game_data(game: dict) -> bool:
+    """Validate game data integrity"""
+    required_fields = ['players', 'state', 'mode', 'host']
+    
+    # Check required fields exist
+    for field in required_fields:
+        if field not in game:
+            logger.error(f"Game missing required field: {field}")
+            return False
+    
+    # Validate data types
+    if not isinstance(game['players'], dict):
+        logger.error("Game players field is not a dictionary")
+        return False
+    
+    if game['state'] not in ['mode_select', 'waiting', 'started']:
+        logger.error(f"Invalid game state: {game['state']}")
+        return False
+    
+    if game['mode'] and game['mode'] not in GAME_MODES:
+        logger.error(f"Invalid game mode: {game['mode']}")
+        return False
+    
+    return True
 
 def validate_game(chat_id: int, user_id: int = None, state: str = None) -> bool:
     """Validate game state and user permissions"""
@@ -231,6 +331,91 @@ def send_to_all_players(context: CallbackContext, chat_id: int, message: str, ex
                 context.bot.send_message(player_id, message, parse_mode='Markdown')
             except Exception as e:
                 logger.error(f"Failed to send message to {player_id}: {e}")
+
+def validate_input(text: str, max_length: int = 500, min_length: int = 1, allow_markdown: bool = False) -> tuple[bool, str]:
+    """Enhanced input validation with security checks"""
+    if not text or not text.strip():
+        return False, "Message cannot be empty"
+    
+    text = text.strip()
+    
+    if len(text) < min_length:
+        return False, f"Message too short (min {min_length} characters)"
+    
+    if len(text) > max_length:
+        return False, f"Message too long (max {max_length} characters)"
+    
+    # Security: Check for potential injection attempts
+    dangerous_patterns = [
+        '<script', '</script>', 'javascript:', 'data:', 'vbscript:',
+        'onload=', 'onerror=', 'onclick=', 'eval(', 'setTimeout(',
+        'setInterval(', 'Function(', 'alert(', 'confirm(', 'prompt('
+    ]
+    
+    text_lower = text.lower()
+    for pattern in dangerous_patterns:
+        if pattern in text_lower:
+            return False, "Message contains potentially dangerous content"
+    
+    # Basic HTML sanitization (if not allowing markdown)
+    if not allow_markdown:
+        forbidden_chars = ['<', '>', '&', '"', "'", '`']
+        if any(char in text for char in forbidden_chars):
+            return False, "Message contains forbidden characters"
+    
+    # Length check for individual words (prevent spam)
+    words = text.split()
+    if any(len(word) > 50 for word in words):
+        return False, "Individual words too long (max 50 characters each)"
+    
+    return True, text
+
+def check_rate_limit(user_id: int, action: str, limit_seconds: int = 60) -> tuple[bool, int]:
+    """Check if user is rate limited for specific action"""
+    with game_state.lock:
+        key = f"{action}_{user_id}"
+        if not hasattr(game_state, 'action_cooldowns'):
+            game_state.action_cooldowns = {}
+        
+        current_time = time.time()
+        last_action = game_state.action_cooldowns.get(key, 0)
+        time_left = limit_seconds - (current_time - last_action)
+        
+        if time_left > 0:
+            return False, int(time_left)
+        
+        game_state.action_cooldowns[key] = current_time
+        return True, 0
+
+def send_safe_message(context: CallbackContext, chat_id: int, message: str, parse_mode: str = 'Markdown') -> bool:
+    """Safely send message with error handling"""
+    try:
+        context.bot.send_message(chat_id, message, parse_mode=parse_mode)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send message to {chat_id}: {e}")
+        return False
+
+def get_user_name_safe(user) -> str:
+    """Safely get user name with fallback"""
+    return getattr(user, 'first_name', None) or getattr(user, 'username', 'Unknown')
+
+def is_authorized_to_control_game(user_id: int, game: dict, context: CallbackContext, chat_id: int) -> bool:
+    """Check if user can control the game (host, bot admin, or group admin)"""
+    # Bot admin check
+    if is_admin(user_id):
+        return True
+    
+    # Host check
+    if user_id == game.get('host'):
+        return True
+    
+    # Group admin check
+    try:
+        member = context.bot.get_chat_member(chat_id, user_id)
+        return member.status in ['administrator', 'creator']
+    except:
+        return False
 
 # --- Command handlers ---
 def start(update: Update, context: CallbackContext):
@@ -617,7 +802,6 @@ def begin(update: Update, context: CallbackContext):
 
 def anon(update: Update, context: CallbackContext):
     """Handle anonymous messages from players"""
-    # Only works in private chats
     if update.effective_chat.type != 'private':
         update.message.reply_text(
             "❌ Anonymous messages can only be sent in private chat with the bot.\n"
@@ -628,69 +812,64 @@ def anon(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     current_time = time.time()
     
-    # Rate limiting with thread-safe lock
+    # Rate limiting with thread safety
     with game_state.lock:
-        # Initialize cooldowns if not exists
-        if not hasattr(game_state, 'anon_cooldowns'):
-            game_state.anon_cooldowns = {}
-        
-        # Check cooldown
         if user_id in game_state.anon_cooldowns:
             time_elapsed = current_time - game_state.anon_cooldowns[user_id]
-            if time_elapsed < 60:  # 1 minute cooldown
+            if time_elapsed < 60:
                 update.message.reply_text(
                     f"⏳ Please wait {60 - int(time_elapsed)} seconds before sending another anonymous message."
                 )
                 return
     
-    # Validate message content
+    # Validate message
     message = ' '.join(context.args) if context.args else ""
-    message = message.strip()
+    is_valid, result = validate_input(message)
     
-    if not message:
-        update.message.reply_text(
-            "Usage: /anon <your message>\n\n"
-            "Example: /anon I think the spy is acting suspicious when answering about transportation"
-        )
+    if not is_valid:
+        update.message.reply_text(f"❌ {result}")
         return
+
+    message = result
     
-    # Limit message length
-    if len(message) > 500:
-        update.message.reply_text("❌ Message too long (max 500 characters).")
-        return
-    
-    # Find active games where user is playing
+    # Find active games
     active_games = []
     with game_state.lock:
         for chat_id, game in game_state.games.items():
-            if (user_id in game['players'] and 
-                game['state'] == 'started' and 
-                chat_id not in [g[0] for g in active_games]):
+            if (user_id in game['players'] and game['state'] == 'started'):
                 active_games.append((chat_id, game))
     
     if not active_games:
         update.message.reply_text(
-            "❌ You're not in any active games or the game hasn't started yet.\n"
-            "Join a game with /join and wait for it to begin."
+            "❌ You're not in any active games or the game hasn't started yet."
         )
         return
     
-    # If in multiple games, ask which one to send to
+    # Multiple games - use message ID system
     if len(active_games) > 1:
+        import hashlib
+        message_id = hashlib.md5(f"{user_id}_{current_time}_{message}".encode()).hexdigest()[:8]
+        
+        # Store message temporarily
+        with game_state.lock:
+            game_state.temp_anon_messages[message_id] = {
+                'message': message,
+                'user_id': user_id,
+                'timestamp': current_time
+            }
+        
         keyboard = []
         for chat_id, game in active_games:
             try:
-                # Get group title or host name as identifier
                 chat = context.bot.get_chat(chat_id)
-                group_name = chat.title or f"Group with {game['players'][game['host']]}"
-            except Exception as e:
-                logger.warning(f"Couldn't get chat info for {chat_id}: {e}")
+                group_name = chat.title or f"Game with {game['players'][game['host']]}"
+            except:
                 group_name = f"Game with {game['players'][game['host']]}"
             
             keyboard.append([
                 InlineKeyboardButton(
                     group_name,
-                    callback_data=f"anon_game:{chat_id}:{message[:64]}"  # Truncate for callback data limit
+                    callback_data=f"anon_game:{chat_id}:{message_id}"
                 )
             ])
         
@@ -701,7 +880,7 @@ def anon(update: Update, context: CallbackContext):
         )
         return
     
-    # Single game - send immediately
+    # Single game
     chat_id = active_games[0][0]
     _send_anon_message(context, user_id, chat_id, message)
 
@@ -712,35 +891,46 @@ def anon_callback(update: Update, context: CallbackContext):
     
     try:
         data = query.data.split(':')
-        if len(data) < 3:
-            raise ValueError("Invalid callback data")
+        if len(data) != 3:
+            query.edit_message_text("❌ Invalid request.")
+            return
             
         chat_id = int(data[1])
-        message = ':'.join(data[2:])  # Reconstruct message
+        message_id = data[2]
         user_id = query.from_user.id
         
-        # Verify game still exists and user is still in it
+        # Get stored message
+        with game_state.lock:
+            message_data = game_state.temp_anon_messages.get(message_id)
+        
+        if not message_data:
+            query.edit_message_text("❌ Message expired. Please try again.")
+            return
+        
+        if message_data['user_id'] != user_id:
+            query.edit_message_text("❌ Invalid request.")
+            return
+        
+        message = message_data['message']
+        
+        # Verify game still exists
         game = game_state.get_game(chat_id)
         if not game or user_id not in game['players'] or game['state'] != 'started':
-            query.edit_message_text("❌ Game no longer active or you left the game.")
+            query.edit_message_text("❌ Game no longer active.")
+            with game_state.lock:
+                game_state.temp_anon_messages.pop(message_id, None)
             return
         
         _send_anon_message(context, user_id, chat_id, message)
         query.edit_message_text("✅ Message sent anonymously!")
         
+        # Clean up
+        with game_state.lock:
+            game_state.temp_anon_messages.pop(message_id, None)
+        
     except Exception as e:
         logger.error(f"Error in anon_callback: {e}")
-        query.edit_message_text("❌ Failed to send message. Please try again.")
-        # Notify admins of callback errors
-        for admin_id in ADMIN_IDS:
-            try:
-                context.bot.send_message(
-                    admin_id,
-                    f"⚠️ Anon callback error:\n{e}\n\nFrom: {query.from_user.id}",
-                    parse_mode='Markdown'
-                )
-            except Exception as admin_error:
-                logger.error(f"Failed to notify admin: {admin_error}")
+        query.edit_message_text("❌ Failed to send message.")
 
 def _send_anon_message(context: CallbackContext, user_id: int, chat_id: int, message: str):
     """Actually send the anonymous message with proper error handling"""
