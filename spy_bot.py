@@ -5,6 +5,7 @@
 import os
 import logging
 import random
+import time
 from threading import Timer, Lock
 from datetime import datetime
 from typing import Dict, List, Optional, Union
@@ -38,6 +39,7 @@ class GameState:
         self.games: Dict[int, dict] = {}  # {chat_id: game_data}
         self.player_stats: Dict[int, dict] = {}  # {user_id: stats}
         self.active_timers: Dict[int, List[Timer]] = {}  # {chat_id: timers}
+        self.anon_cooldowns: Dict[int, float] = {}  # {user_id: last_used_time}
 
     def get_game(self, chat_id: int) -> Optional[dict]:
         with self.lock:
@@ -526,13 +528,13 @@ def begin(update: Update, context: CallbackContext):
     elif mode_config['special'] == 'double_agent':
         game['spy'] = random.choice(players)
         remaining = [p for p in players if p != game['spy']]
-        game['double_agent'] = random.choice(remaining)
+        game['double_agent'] = [random.choice(remaining)]
         fake_location = get_random_location()
         
         for uid in players:
             if uid == game['spy']:
                 context.bot.send_message(uid, "🕵️ You are the SPY!")
-            elif uid == game['double_agent']:
+            elif uid in game.get('double_agent', []):
                 context.bot.send_message(
                     uid,
                     f"🧭 You are a civilian.\nLocation: *{fake_location}* ❌",
@@ -561,7 +563,7 @@ def begin(update: Update, context: CallbackContext):
                     f"🕵️ You are a SPY!\nPartners: {partners_names}",
                     parse_mode='Markdown'
                 )
-            elif uid in game['double_agent']:
+            elif uid in game.get('double_agent', []):
                 fake_location = get_random_location()
                 context.bot.send_message(
                     uid,
@@ -597,17 +599,198 @@ def begin(update: Update, context: CallbackContext):
     )
     
     def start_voting_wrapper():
-        if game_state.get_game(chat_id):
-            context.bot.send_message(
-                chat_id,
-                "⏰ Discussion time over! Starting voting...",
-                parse_mode='Markdown'
-            )
-            start_voting(chat_id, context)
+        game = game_state.get_game(chat_id)
+        if game and game['state'] == 'started':
+            try:
+                context.bot.send_message(
+                    chat_id,
+                    "⏰ Discussion time over! Starting voting...",
+                    parse_mode='Markdown'
+                )
+                start_voting(chat_id, context)
+            except Exception as e:
+                logger.error(f"Failed to start voting automatically: {e}")
     
     timer = Timer(discussion_time, start_voting_wrapper)
     timer.start()
     game_state.add_timer(chat_id, timer)
+
+def anon(update: Update, context: CallbackContext):
+    """Handle anonymous messages from players"""
+    # Only works in private chats
+    if update.effective_chat.type != 'private':
+        update.message.reply_text(
+            "❌ Anonymous messages can only be sent in private chat with the bot.\n"
+            "Message me directly to send anonymous messages to your game."
+        )
+        return
+    
+    user_id = update.effective_user.id
+    current_time = time.time()
+    
+    # Rate limiting with thread-safe lock
+    with game_state.lock:
+        # Initialize cooldowns if not exists
+        if not hasattr(game_state, 'anon_cooldowns'):
+            game_state.anon_cooldowns = {}
+        
+        # Check cooldown
+        if user_id in game_state.anon_cooldowns:
+            time_elapsed = current_time - game_state.anon_cooldowns[user_id]
+            if time_elapsed < 60:  # 1 minute cooldown
+                update.message.reply_text(
+                    f"⏳ Please wait {60 - int(time_elapsed)} seconds before sending another anonymous message."
+                )
+                return
+    
+    # Validate message content
+    message = ' '.join(context.args) if context.args else ""
+    message = message.strip()
+    
+    if not message:
+        update.message.reply_text(
+            "Usage: /anon <your message>\n\n"
+            "Example: /anon I think the spy is acting suspicious when answering about transportation"
+        )
+        return
+    
+    # Limit message length
+    if len(message) > 500:
+        update.message.reply_text("❌ Message too long (max 500 characters).")
+        return
+    
+    # Find active games where user is playing
+    active_games = []
+    with game_state.lock:
+        for chat_id, game in game_state.games.items():
+            if (user_id in game['players'] and 
+                game['state'] == 'started' and 
+                chat_id not in [g[0] for g in active_games]):
+                active_games.append((chat_id, game))
+    
+    if not active_games:
+        update.message.reply_text(
+            "❌ You're not in any active games or the game hasn't started yet.\n"
+            "Join a game with /join and wait for it to begin."
+        )
+        return
+    
+    # If in multiple games, ask which one to send to
+    if len(active_games) > 1:
+        keyboard = []
+        for chat_id, game in active_games:
+            try:
+                # Get group title or host name as identifier
+                chat = context.bot.get_chat(chat_id)
+                group_name = chat.title or f"Group with {game['players'][game['host']]}"
+            except Exception as e:
+                logger.warning(f"Couldn't get chat info for {chat_id}: {e}")
+                group_name = f"Game with {game['players'][game['host']]}"
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    group_name,
+                    callback_data=f"anon_game:{chat_id}:{message[:64]}"  # Truncate for callback data limit
+                )
+            ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        update.message.reply_text(
+            "📌 Select which game to send your anonymous message to:",
+            reply_markup=reply_markup
+        )
+        return
+    
+    # Single game - send immediately
+    chat_id = active_games[0][0]
+    _send_anon_message(context, user_id, chat_id, message)
+
+def anon_callback(update: Update, context: CallbackContext):
+    """Handle game selection for anonymous messages"""
+    query = update.callback_query
+    query.answer()
+    
+    try:
+        data = query.data.split(':')
+        if len(data) < 3:
+            raise ValueError("Invalid callback data")
+            
+        chat_id = int(data[1])
+        message = ':'.join(data[2:])  # Reconstruct message
+        user_id = query.from_user.id
+        
+        # Verify game still exists and user is still in it
+        game = game_state.get_game(chat_id)
+        if not game or user_id not in game['players'] or game['state'] != 'started':
+            query.edit_message_text("❌ Game no longer active or you left the game.")
+            return
+        
+        _send_anon_message(context, user_id, chat_id, message)
+        query.edit_message_text("✅ Message sent anonymously!")
+        
+    except Exception as e:
+        logger.error(f"Error in anon_callback: {e}")
+        query.edit_message_text("❌ Failed to send message. Please try again.")
+        # Notify admins of callback errors
+        for admin_id in ADMIN_IDS:
+            try:
+                context.bot.send_message(
+                    admin_id,
+                    f"⚠️ Anon callback error:\n{e}\n\nFrom: {query.from_user.id}",
+                    parse_mode='Markdown'
+                )
+            except Exception as admin_error:
+                logger.error(f"Failed to notify admin: {admin_error}")
+
+def _send_anon_message(context: CallbackContext, user_id: int, chat_id: int, message: str):
+    """Actually send the anonymous message with proper error handling"""
+    # Apply cooldown with thread safety
+    with game_state.lock:
+        if not hasattr(game_state, 'anon_cooldowns'):
+            game_state.anon_cooldowns = {}
+        game_state.anon_cooldowns[user_id] = time.time()
+    
+    try:
+        # Verify game still exists
+        game = game_state.get_game(chat_id)
+        if not game or game['state'] != 'started':
+            context.bot.send_message(
+                user_id,
+                "❌ Game no longer active. Message not sent."
+            )
+            return
+        
+        # Format and send message
+        formatted_msg = (
+            f"🕵️‍♂️ *Anonymous Message from a Player:*\n\n"
+            f"{message.strip()}\n\n"
+            f"_Use /anon in private chat with me to send anonymous messages_"
+        )
+        
+        # Send to group
+        context.bot.send_message(
+            chat_id,
+            formatted_msg,
+            parse_mode='Markdown'
+        )
+        
+        # Notify sender
+        context.bot.send_message(
+            user_id,
+            "✅ Your anonymous message was sent to the game group!",
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to send anonymous message from {user_id}: {e}")
+        try:
+            context.bot.send_message(
+                user_id,
+                "❌ Failed to send your anonymous message. Please try again later.",
+                parse_mode='Markdown'
+            )
+        except Exception as fallback_error:
+            logger.error(f"Couldn't notify sender of failure: {fallback_error}")
 
 def location_command(update: Update, context: CallbackContext):
     """Send location info to player"""
@@ -691,20 +874,25 @@ def start_voting(chat_id: int, context: CallbackContext):
     voting_time = mode_config['voting_time']
     
     def voting_timeout():
-        if game_state.get_game(chat_id):
+        game = game_state.get_game(chat_id)
+        if game and game['state'] == 'started':
             context.bot.send_message(chat_id, "⏰ Voting time over!")
             finish_vote(chat_id, context)
     
     def voting_progress():
-        if game_state.get_game(chat_id):
+        game = game_state.get_game(chat_id)
+        if game and game['state'] == 'started' and 'votes' in game:
             votes_received = len(game['votes'])
             total_players = len(game['players'])
             if votes_received < total_players:
-                context.bot.send_message(
-                    chat_id,
-                    f"📥 Votes received: {votes_received}/{total_players}",
-                    parse_mode='Markdown'
-                )
+                try:
+                    context.bot.send_message(
+                        chat_id,
+                        f"📥 Votes received: {votes_received}/{total_players}",
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send voting progress: {e}")
     
     vote_timer = Timer(voting_time, voting_timeout)
     progress_timer = Timer(voting_time/2, voting_progress)
@@ -836,6 +1024,8 @@ def finish_vote(chat_id: int, context: CallbackContext):
     
     if mode_config['special'] == 'team_spy':
         if chosen in game['spy']:
+            # Store name before deletion
+            chosen_name = game['players'][chosen]
             # Remove caught spy
             game['spy'] = [s for s in game['spy'] if s != chosen]
             del game['players'][chosen]
@@ -924,13 +1114,17 @@ def finish_vote(chat_id: int, context: CallbackContext):
             guess_time = mode_config['guess_time']
             
             def guess_timeout():
-                if game_state.get_game(chat_id) and game['awaiting_guess']:
-                    context.bot.send_message(
-                        chat_id,
-                        "⏰ Spy failed to guess in time. Civilians win!",
-                        parse_mode='Markdown'
-                    )
-                    end_game(chat_id, 'civilian_win', context)
+               game = game_state.get_game(chat_id)
+               if game and game.get('awaiting_guess', False):
+                    try:
+                        context.bot.send_message(
+                            chat_id,
+                            "⏰ Spy failed to guess in time. Civilians win!",
+                            parse_mode='Markdown'
+                        )
+                        end_game(chat_id, 'civilian_win', context)
+                    except Exception as e:
+                        logger.error(f"Failed to send timeout message: {e}")
             
             timer = Timer(guess_time, guess_timeout)
             timer.start()
@@ -1261,6 +1455,7 @@ def main():
         ('leaderboard', show_leaderboard),
         ('achievements', show_achievements),
         ('adminstats', admin_stats),
+        ('anon', anon),
     ]
     
     for cmd, handler in commands:
@@ -1269,6 +1464,7 @@ def main():
     # Callback handlers
     dp.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^vote:"))
     dp.add_handler(CallbackQueryHandler(mode_callback, pattern=r"^mode:"))
+    dp.add_handler(CallbackQueryHandler(anon_callback, pattern=r"^anon_game:"))
     
     # Message handler for spy guesses
     dp.add_handler(MessageHandler(Filters.text & Filters.private, handle_guess))
