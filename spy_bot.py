@@ -5,6 +5,7 @@
 import os
 import logging
 import random
+import time
 from threading import Timer, Lock
 from datetime import datetime
 from typing import Dict, List, Optional, Union
@@ -38,6 +39,7 @@ class GameState:
         self.games: Dict[int, dict] = {}  # {chat_id: game_data}
         self.player_stats: Dict[int, dict] = {}  # {user_id: stats}
         self.active_timers: Dict[int, List[Timer]] = {}  # {chat_id: timers}
+        self.anon_cooldowns: Dict[int, float] = {}  # {user_id: timestamp}
 
     def get_game(self, chat_id: int) -> Optional[dict]:
         with self.lock:
@@ -650,6 +652,95 @@ def location_command(update: Update, context: CallbackContext):
             f"🧭 You are a civilian.\nLocation: *{game['location']}*",
             parse_mode='Markdown'
         )
+
+# Add this with other command handlers
+def anon(update: Update, context: CallbackContext):
+    """Handle anonymous messages from players"""
+    user_id = update.effective_user.id
+    
+    # Only works in private chats
+    if update.effective_chat.type != 'private':
+        update.message.reply_text("❌ Please send anonymous messages in private chat with the bot.")
+        return
+    
+    # Check rate limiting
+    if hasattr(game_state, 'anon_cooldowns') and user_id in game_state.anon_cooldowns:
+        time_elapsed = time.time() - game_state.anon_cooldowns[user_id]
+        if time_elapsed < 60:
+            update.message.reply_text(f"⏳ Please wait {60 - int(time_elapsed)} seconds before sending another anonymous message.")
+            return
+    
+    # Find active games where user is playing
+    active_games = []
+    for chat_id, game in game_state.games.items():
+        if user_id in game['players'] and game['state'] == 'started':
+            active_games.append((chat_id, game))
+    
+    if not active_games:
+        update.message.reply_text("❌ You're not in any active games.")
+        return
+    
+    # Get message content
+    message = ' '.join(context.args) if context.args else ""
+    if not message.strip():
+        update.message.reply_text("Usage: /anon <your message>")
+        return
+    
+    # If in multiple games, ask which one to send to
+    if len(active_games) > 1:
+        keyboard = [
+            [InlineKeyboardButton(
+                f"Game in {game['players'][game['host']]}'s group", 
+                callback_data=f"anon_game:{chat_id}:{message}"
+            )]
+            for chat_id, game in active_games
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        update.message.reply_text(
+            "📌 Select which game to send your anonymous message to:",
+            reply_markup=reply_markup
+        )
+        return
+    
+    # Single game - send immediately
+    chat_id = active_games[0][0]
+    _send_anon_message(context, user_id, chat_id, message)
+
+def anon_callback(update: Update, context: CallbackContext):
+    """Handle game selection for anonymous messages"""
+    query = update.callback_query
+    data = query.data.split(':')
+    chat_id = int(data[1])
+    message = ':'.join(data[2:])  # In case message contains colons
+    user_id = query.from_user.id
+    
+    _send_anon_message(context, user_id, chat_id, message)
+    query.answer("Message sent anonymously!")
+    query.message.delete()
+
+def _send_anon_message(context: CallbackContext, user_id: int, chat_id: int, message: str):
+    """Actually send the anonymous message"""
+    # Apply cooldown
+    if not hasattr(game_state, 'anon_cooldowns'):
+        game_state.anon_cooldowns = {}
+    game_state.anon_cooldowns[user_id] = time.time()
+    
+    # Send to group
+    context.bot.send_message(
+        chat_id,
+        f"🕵️ *Anonymous Message:*\n{message.strip()}",
+        parse_mode='Markdown'
+    )
+    
+    # Notify sender
+    try:
+        context.bot.send_message(
+            user_id,
+            f"✅ Your anonymous message was sent to the game group!",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Couldn't notify sender: {e}")
 
 def vote(update: Update, context: CallbackContext):
     """Start voting process"""
@@ -1264,6 +1355,7 @@ def main():
         ('leaderboard', show_leaderboard),
         ('achievements', show_achievements),
         ('adminstats', admin_stats)
+        ('anon', anon),
     ]
     
     for cmd, handler in commands:
@@ -1272,6 +1364,7 @@ def main():
     # Callback handlers
     dp.add_handler(CallbackQueryHandler(vote_callback, pattern=r"^vote:"))
     dp.add_handler(CallbackQueryHandler(mode_callback, pattern=r"^mode:"))
+    dp.add_handler(CallbackQueryHandler(anon_callback, pattern=r"^anon_game:"))
     
     # Message handler for spy guesses
     dp.add_handler(MessageHandler(Filters.text & Filters.private, handle_guess))
