@@ -951,11 +951,7 @@ def _send_anon_message(context: CallbackContext, user_id: int, chat_id: int, mes
             return
         
         # Format and send message
-        formatted_msg = (
-            f"🕵️‍♂️ *Anonymous Message from a Player:*\n\n"
-            f"{message.strip()}\n\n"
-            f"_Use /anon in private chat with me to send anonymous messages_"
-        )
+        formatted_msg = f"{message.strip()}"
         
         # Send to group
         context.bot.send_message(
