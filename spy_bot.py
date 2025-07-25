@@ -963,7 +963,7 @@ def _send_anon_message(context: CallbackContext, user_id: int, chat_id: int, mes
         # Notify sender
         context.bot.send_message(
             user_id,
-            "✅ Your anonymous message was sent to the game group!",
+            "✅ Message sent!",
             parse_mode='Markdown'
         )
         
