@@ -722,7 +722,7 @@ def begin(update: Update, context: CallbackContext):
             elif uid in game.get('double_agent', []):
                 context.bot.send_message(
                     uid,
-                    f"🧭 You are a civilian.\nLocation: *{fake_location}* ❌",
+                    f"🧭 You are a civilian.\nLocation: *{fake_location}*",
                     parse_mode='Markdown'
                 )
             else:
@@ -1108,19 +1108,57 @@ def vote_callback(update: Update, context: CallbackContext):
         query.answer("You're not in this game.")
         return
     
-    if user_id in game['votes']:
+    if user_id in game.get('votes', {}):
         query.answer("You already voted!")
         return
     
-    voted_id = int(query.data.split(":")[1])
+    try:
+        voted_id = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        query.answer("Invalid vote.")
+        return
+    
+    if voted_id not in game['players']:
+        query.answer("Invalid player.")
+        return
+    
+    # Record the vote
+    if 'votes' not in game:
+        game['votes'] = {}
+    
     game['votes'][user_id] = voted_id
     voted_name = game['players'].get(voted_id, "Unknown")
     
     query.answer(f"Voted for {voted_name}")
     
+    # Update vote count display
+    votes_received = len(game['votes'])
+    total_players = len(game['players'])
+    
+    try:
+        # Edit the voting message to show progress
+        context.bot.edit_message_text(
+            text=f"🗳 *Who is the spy?*\nVotes received: {votes_received}/{total_players}",
+            chat_id=chat_id,
+            message_id=query.message.message_id,
+            reply_markup=query.message.reply_markup,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.warning(f"Failed to update vote progress: {e}")
+    
     # Check if all votes are in
-    if len(game['votes']) == len(game['players']):
-        finish_vote(chat_id, context)
+    if votes_received == total_players:
+        # Cancel voting timer since all votes are in
+        cancel_timers(chat_id)
+        
+        # Small delay to show final vote count
+        def finish_voting():
+            finish_vote(chat_id, context)
+        
+        timer = Timer(1.0, finish_voting)  # 1 second delay
+        timer.start()
+        game_state.add_timer(chat_id, timer)
 
 def mode_callback(update: Update, context: CallbackContext):
     """Handle game mode selection"""
@@ -1182,6 +1220,9 @@ def finish_vote(chat_id: int, context: CallbackContext):
         voted_name = game['players'].get(voted_id, "Unknown")
         breakdown += f"- {voter_name} → {voted_name}\n"
     
+    # Send breakdown first
+    context.bot.send_message(chat_id, breakdown, parse_mode='Markdown')
+    
     # Determine who was voted out
     max_votes = max(vote_counts.values())
     top_voted = [uid for uid, count in vote_counts.items() if count == max_votes]
@@ -1189,12 +1230,22 @@ def finish_vote(chat_id: int, context: CallbackContext):
     if len(top_voted) > 1:
         # Tie - randomly select one
         chosen = random.choice(top_voted)
-        context.bot.send_message(chat_id, "⚠️ Voting tie! Randomly selecting one...")
+        chosen_name = game['players'].get(chosen, "Unknown")
+        context.bot.send_message(
+            chat_id, 
+            f"⚠️ Voting tie! Randomly selecting **{chosen_name}**",
+            parse_mode='Markdown'
+        )
     else:
         chosen = top_voted[0]
+        chosen_name = game['players'].get(chosen, "Unknown")
     
-    chosen_name = game['players'].get(chosen, "Unknown")
-    context.bot.send_message(chat_id, breakdown, parse_mode='Markdown')
+    # MISSING PART - Announce elimination result
+    context.bot.send_message(
+        chat_id,
+        f"🎯 **{chosen_name}** was eliminated with **{vote_counts[chosen]}** vote(s)!",
+        parse_mode='Markdown'
+    )
     
     # Update statistics for voters
     for voter_id in votes:
@@ -1214,8 +1265,6 @@ def finish_vote(chat_id: int, context: CallbackContext):
     
     if mode_config['special'] == 'team_spy':
         if chosen in game['spy']:
-            # Store name before deletion
-            chosen_name = game['players'][chosen]
             # Remove caught spy
             game['spy'] = [s for s in game['spy'] if s != chosen]
             del game['players'][chosen]
@@ -1244,47 +1293,74 @@ def finish_vote(chat_id: int, context: CallbackContext):
             end_game(chat_id, 'spy_win', context)
     
     elif mode_config['special'] in ['double_agent', 'chaos']:
-        if chosen == game.get('spy'):
-            # Real spy caught
-            context.bot.send_message(
-                chat_id,
-                f"✅ {chosen_name} was the real spy! Civilians win!",
-                parse_mode='Markdown'
-            )
-            end_game(chat_id, 'civilian_win', context)
-        elif chosen in game.get('double_agent', []):
-            # Double agent caught
-            spy_name = game['players'].get(game['spy'], "Unknown")
-            context.bot.send_message(
-                chat_id,
-                f"❌ {chosen_name} was a double agent! Real spy {spy_name} wins!",
-                parse_mode='Markdown'
-            )
-            end_game(chat_id, 'spy_win', context)
+        if isinstance(game.get('spy'), list):
+            # Handle multiple spies in chaos mode
+            if chosen in game['spy']:
+                context.bot.send_message(
+                    chat_id,
+                    f"✅ {chosen_name} was a spy! Civilians win!",
+                    parse_mode='Markdown'
+                )
+                end_game(chat_id, 'civilian_win', context)
+            elif chosen in game.get('double_agent', []):
+                spy_names = ", ".join(game['players'][s] for s in game['spy'])
+                context.bot.send_message(
+                    chat_id,
+                    f"❌ {chosen_name} was a double agent! Real spies {spy_names} win!",
+                    parse_mode='Markdown'
+                )
+                end_game(chat_id, 'spy_win', context)
+            else:
+                spy_names = ", ".join(game['players'][s] for s in game['spy'])
+                da_names = ", ".join(game['players'][da] for da in game.get('double_agent', []))
+                context.bot.send_message(
+                    chat_id,
+                    f"❌ {chosen_name} was innocent.\n"
+                    f"Spies: {spy_names}\n"
+                    f"Double agents: {da_names or 'None'}",
+                    parse_mode='Markdown'
+                )
+                end_game(chat_id, 'spy_win', context)
         else:
-            # Innocent voted out
-            spy_name = game['players'].get(game['spy'], "Unknown")
-            da_names = ", ".join(game['players'][da] for da in game.get('double_agent', []))
-            context.bot.send_message(
-                chat_id,
-                f"❌ {chosen_name} was innocent.\n"
-                f"Spy: {spy_name}\n"
-                f"Double agents: {da_names or 'None'}",
-                parse_mode='Markdown'
-            )
-            end_game(chat_id, 'spy_win', context)
+            # Single spy mode
+            if chosen == game.get('spy'):
+                context.bot.send_message(
+                    chat_id,
+                    f"✅ {chosen_name} was the real spy! Civilians win!",
+                    parse_mode='Markdown'
+                )
+                end_game(chat_id, 'civilian_win', context)
+            elif chosen in game.get('double_agent', []):
+                spy_name = game['players'].get(game['spy'], "Unknown")
+                context.bot.send_message(
+                    chat_id,
+                    f"❌ {chosen_name} was a double agent! Real spy {spy_name} wins!",
+                    parse_mode='Markdown'
+                )
+                end_game(chat_id, 'spy_win', context)
+            else:
+                spy_name = game['players'].get(game['spy'], "Unknown")
+                da_names = ", ".join(game['players'][da] for da in game.get('double_agent', []))
+                context.bot.send_message(
+                    chat_id,
+                    f"❌ {chosen_name} was innocent.\n"
+                    f"Spy: {spy_name}\n"
+                    f"Double agents: {da_names or 'None'}",
+                    parse_mode='Markdown'
+                )
+                end_game(chat_id, 'spy_win', context)
     
     else:  # Normal mode
         if chosen == game['spy']:
             # Spy caught
             context.bot.send_message(
                 chat_id,
-                f"✅ {chosen_name} was the spy! Civilians win! 🎉",
+                f"🎉 {chosen_name} was the spy! Civilians win!",
                 parse_mode='Markdown'
             )
             end_game(chat_id, 'civilian_win', context)
         else:
-            # Innocent voted out
+            # Innocent voted out - spy gets to guess
             spy_name = game['players'].get(game['spy'], "Unknown")
             context.bot.send_message(
                 chat_id,
@@ -1294,18 +1370,29 @@ def finish_vote(chat_id: int, context: CallbackContext):
             
             # Spy gets to guess
             game['awaiting_guess'] = True
-            context.bot.send_message(
-                game['spy'],
-                "🕵️ You survived! Guess the location (reply here):",
-                parse_mode='Markdown'
-            )
+            try:
+                context.bot.send_message(
+                    game['spy'],
+                    f"🕵️ You survived! Guess the location within {mode_config['guess_time']} seconds:",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Failed to send guess message to spy: {e}")
+                # If can't message spy, civilians win
+                context.bot.send_message(
+                    chat_id,
+                    "❌ Spy unreachable. Civilians win!",
+                    parse_mode='Markdown'
+                )
+                end_game(chat_id, 'civilian_win', context)
+                return
             
             # Set guess timer
             guess_time = mode_config['guess_time']
             
             def guess_timeout():
-               game = game_state.get_game(chat_id)
-               if game and game.get('awaiting_guess', False):
+                game = game_state.get_game(chat_id)
+                if game and game.get('awaiting_guess', False):
                     try:
                         context.bot.send_message(
                             chat_id,
@@ -1322,35 +1409,70 @@ def finish_vote(chat_id: int, context: CallbackContext):
 
 def handle_guess(update: Update, context: CallbackContext):
     """Process spy's location guess"""
-    chat_id = update.message.chat_id
-    user_id = update.effective_user.id
-    game = game_state.get_game(chat_id)
+    if update.effective_chat.type != 'private':
+        return  # Only process guesses in private chat
     
-    if not game or not game['awaiting_guess'] or user_id != game.get('spy'):
+    user_id = update.effective_user.id
+    guess_text = update.message.text.strip()
+    
+    # Find the game where this user is the spy and awaiting guess
+    target_chat_id = None
+    target_game = None
+    
+    with game_state.lock:
+        for chat_id, game in game_state.games.items():
+            if (game.get('awaiting_guess', False) and 
+                ((isinstance(game.get('spy'), list) and user_id in game['spy']) or 
+                 game.get('spy') == user_id)):
+                target_chat_id = chat_id
+                target_game = game
+                break
+    
+    if not target_game or not target_chat_id:
+        return  # Not a valid guess context
+    
+    # Validate guess input
+    is_valid, validated_guess = validate_input(guess_text, max_length=100, min_length=1)
+    if not is_valid:
+        update.message.reply_text(f"❌ {validated_guess}")
         return
     
-    guess = update.message.text.strip().lower()
-    correct = game['location'].lower()
+    guess = validated_guess.lower().strip()
+    correct = target_game['location'].lower().strip()
     
-    # Cancel guess timer
-    cancel_timers(chat_id)
-    game['awaiting_guess'] = False
+    # Cancel guess timer and update game state
+    cancel_timers(target_chat_id)
+    target_game['awaiting_guess'] = False
     
-    # Check guess
-    if guess == correct:
-        context.bot.send_message(
-            chat_id,
-            f"🎉 The spy guessed correctly! Location was *{game['location']}*. Spy wins!",
-            parse_mode='Markdown'
-        )
-        end_game(chat_id, 'spy_win', context)
-    else:
-        context.bot.send_message(
-            chat_id,
-            f"❌ Spy guessed '{guess}'. Correct was *{game['location']}*. Civilians win!",
-            parse_mode='Markdown'
-        )
-        end_game(chat_id, 'civilian_win', context)
+    # Check if guess is correct (exact match or very close)
+    is_correct = (guess == correct or 
+                  guess in correct or 
+                  correct in guess or
+                  abs(len(guess) - len(correct)) <= 2 and 
+                  sum(a != b for a, b in zip(guess, correct)) <= 2)
+    
+    try:
+        if is_correct:
+            context.bot.send_message(
+                target_chat_id,
+                f"🎉 The spy guessed correctly! Location was **{target_game['location']}**. Spy wins!",
+                parse_mode='Markdown'
+            )
+            update.message.reply_text("🎉 Correct guess! You win!")
+            end_game(target_chat_id, 'spy_win', context)
+        else:
+            context.bot.send_message(
+                target_chat_id,
+                f"❌ Spy guessed '{guess_text}'. Correct was **{target_game['location']}**. Civilians win!",
+                parse_mode='Markdown'
+            )
+            update.message.reply_text(f"❌ Wrong! Correct answer was: {target_game['location']}")
+            end_game(target_chat_id, 'civilian_win', context)
+            
+    except Exception as e:
+        logger.error(f"Failed to send guess result: {e}")
+        # Fallback - end game as civilian win
+        end_game(target_chat_id, 'civilian_win', context)
 
 def end_game(chat_id: int, result: str, context: CallbackContext = None):
     """Finalize game and update statistics"""
