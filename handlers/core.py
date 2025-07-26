@@ -6,9 +6,6 @@ from utils.helpers import format_time
 
 def start(update: Update, context: CallbackContext):
     """Send welcome message"""
-    user = update.effective_user
-    update.message.reply_text(f"🆔 Your Telegram ID is: `{user.id}`", parse_mode='Markdown')
-    
     update.message.reply_text(
         """🕵️‍♂️ *Welcome to Spy Bot - Ultimate Social Deduction Game!*
 
