@@ -1,2 +1,12 @@
-.env
+# Ignore Python virtual environment
+.venv/
+env/
+
+# Ignore Python cache and bytecode
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore dotenv
+.env
