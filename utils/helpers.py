@@ -100,20 +100,16 @@ def validate_game_data(game: dict) -> bool:
     
     return True
 
-def validate_game(chat_id: int, user_id: int = None, state: str = None) -> bool:
-    """Validate game state and user permissions"""
-    game = game_state.get_game(chat_id)
-    if not game:
-        return False
-    if user_id and user_id not in game['players']:
-        return False
-    if state and game['state'] != state:
-        return False
-    return True
-
 def cancel_timers(chat_id: int):
     """Cancel all active timers for a game"""
     game_state.clear_timers(chat_id)
+
+def emergency_cleanup():
+    """NEW: Emergency cleanup function for bot shutdown"""
+    with game_state.lock:
+        for chat_id in list(game_state.active_timers.keys()):
+            game_state.clear_timers(chat_id)
+        game_state.active_timers.clear()
 
 def send_to_all_players(context: CallbackContext, chat_id: int, message: str, exclude: List[int] = None):
     """Send message to all players in a game"""

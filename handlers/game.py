@@ -143,7 +143,7 @@ def players(update: Update, context: CallbackContext):
     )    
 
 def begin(update: Update, context: CallbackContext):
-    """Start the game"""
+    """FIXED: Better timer management in game start"""
     chat_id = update.message.chat_id
     user = update.effective_user
     game = game_state.get_game(chat_id)
@@ -268,6 +268,8 @@ def begin(update: Update, context: CallbackContext):
                     f"🧭 You are a civilian.\nLocation: *{game['location']}*",
                     parse_mode='Markdown'
                 )
+
+    game_state.clear_timers(chat_id)
     
     # Start discussion timer
     discussion_time = mode_config['discussion_time']
@@ -280,7 +282,7 @@ def begin(update: Update, context: CallbackContext):
     
     def start_voting_wrapper():
         game = game_state.get_game(chat_id)
-        if game and game['state'] == 'started':
+        if game and game['state'] == 'started' and not game.get('voting_active', False):  # ✅ Check if voting not already started
             try:
                 context.bot.send_message(
                     chat_id,
@@ -291,9 +293,12 @@ def begin(update: Update, context: CallbackContext):
             except Exception as e:
                 logger.error(f"Failed to start voting automatically: {e}")
     
-    timer = Timer(discussion_time, start_voting_wrapper)
-    timer.start()
-    game_state.add_timer(chat_id, timer)
+    game_state.safe_timer_operation(
+        chat_id, 
+        "discussion_timer", 
+        start_voting_wrapper, 
+        discussion_time
+    )
 
 def location_command(update: Update, context: CallbackContext):
     """Send location info to player"""
@@ -338,7 +343,7 @@ def location_command(update: Update, context: CallbackContext):
         )
 
 def vote(update: Update, context: CallbackContext):
-    """Start voting process"""
+    """Start voting process - FIXED"""
     chat_id = update.message.chat_id
     game = game_state.get_game(chat_id)
     
@@ -346,17 +351,28 @@ def vote(update: Update, context: CallbackContext):
         update.message.reply_text("❌ Voting not available now.")
         return
     
-    # Cancel discussion timer if voting started manually
-    cancel_timers(chat_id)
+    # ✅ Check if voting already started
+    if game.get('voting_active', False):
+        update.message.reply_text("🗳 Voting already in progress!")
+        return
+    
     start_voting(chat_id, context)
 
 def start_voting(chat_id: int, context: CallbackContext):
-    """Initiate voting phase"""
+    """FINAL FIX: Prevent double voting start"""
     game = game_state.get_game(chat_id)
     if not game or game['state'] != 'started':
         return
     
-    game['votes'] = {}
+    # ✅ CRITICAL FIX: Check if voting already active
+    with game_state.lock:
+        if game.get('voting_active', False):
+            return  # Voting already started, don't start again
+        
+        # Clear any existing timers first
+        game_state.clear_timers(chat_id)
+        game['votes'] = {}
+        game['voting_active'] = True
     
     # Create voting buttons
     keyboard = [
@@ -365,113 +381,128 @@ def start_voting(chat_id: int, context: CallbackContext):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    context.bot.send_message(
-        chat_id,
-        "🗳 *Who is the spy?*\nVote by selecting a player below:",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
+    try:
+        msg = context.bot.send_message(
+            chat_id,
+            "🗳 *Who is the spy?*\nVote by selecting a player below:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        
+        # Store message ID for editing
+        with game_state.lock:
+            game['voting_message_id'] = msg.message_id
+
+    except Exception as e:
+        print(f"Failed to send voting message: {e}")
+        return
     
-    # Set voting timer
+    # Get voting time from mode config
     mode_config = GAME_MODES.get(game['mode'], GAME_MODES['normal'])
     voting_time = mode_config['voting_time']
     
+    # ✅ FIXED: Only create voting timeout timer
     def voting_timeout():
-        game = game_state.get_game(chat_id)
-        if game and game['state'] == 'started':
+        try:
+            with game_state.lock:
+                game = game_state.get_game(chat_id)
+                if game and game.get('voting_active', False):
+                    game['voting_active'] = False
+            
             context.bot.send_message(chat_id, "⏰ Voting time over!")
             finish_vote(chat_id, context)
+        except Exception as e:
+            print(f"Voting timeout error: {e}")
     
-    def voting_progress():
-        game = game_state.get_game(chat_id)
-        if game and game['state'] == 'started' and 'votes' in game:
-            votes_received = len(game['votes'])
-            total_players = len(game['players'])
-            if votes_received < total_players:
-                try:
-                    context.bot.send_message(
-                        chat_id,
-                        f"📥 Votes received: {votes_received}/{total_players}",
-                        parse_mode='Markdown'
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send voting progress: {e}")
-    
-    vote_timer = Timer(voting_time, voting_timeout)
-    progress_timer = Timer(voting_time/2, voting_progress)
-    
-    vote_timer.start()
-    progress_timer.start()
-    
-    game_state.add_timer(chat_id, vote_timer)
-    game_state.add_timer(chat_id, progress_timer)
+    # Create timer using safe operation
+    game_state.safe_timer_operation(chat_id, "voting_timeout", voting_timeout, voting_time)
 
 def vote_callback(update: Update, context: CallbackContext):
-    """Handle vote button presses"""
+    """FIXED: Thread-safe voting with proper race condition handling"""
     query = update.callback_query
     user_id = query.from_user.id
     chat_id = query.message.chat_id
-    game = game_state.get_game(chat_id)
     
-    if not game or game['state'] != 'started':
-        query.answer("Voting not active.")
-        return
+    # ✅ FIX: Get game and validate under lock
+    with game_state.lock:
+        game = game_state.games.get(chat_id)
+        
+        if not game or game['state'] != 'started':
+            query.answer("Voting not active.")
+            return
+        
+        if not game.get('voting_active', False):
+            query.answer("Voting has ended.")
+            return
+        
+        if user_id not in game['players']:
+            query.answer("You're not in this game.")
+            return
+        
+        # ✅ FIX: Check if already voted INSIDE the lock
+        if user_id in game.get('votes', {}):
+            query.answer("You already voted!")
+            return
+        
+        # Parse vote target
+        try:
+            voted_id = int(query.data.split(":")[1])
+        except (ValueError, IndexError):
+            query.answer("Invalid vote.")
+            return
+        
+        if voted_id not in game['players']:
+            query.answer("Invalid player.")
+            return
+        
+        # ✅ FIX: Record vote INSIDE the lock - prevents race conditions
+        if 'votes' not in game:
+            game['votes'] = {}
+        
+        game['votes'][user_id] = voted_id
+        voted_name = game['players'].get(voted_id, "Unknown")
+        votes_received = len(game['votes'])
+        total_players = len(game['players'])
+
+        # Check if voting complete
+        voting_complete = votes_received == total_players
+        if voting_complete:
+            game['voting_active'] = False  # Stop accepting votes
     
-    if user_id not in game['players']:
-        query.answer("You're not in this game.")
-        return
-    
-    if user_id in game.get('votes', {}):
-        query.answer("You already voted!")
-        return
-    
-    try:
-        voted_id = int(query.data.split(":")[1])
-    except (ValueError, IndexError):
-        query.answer("Invalid vote.")
-        return
-    
-    if voted_id not in game['players']:
-        query.answer("Invalid player.")
-        return
-    
-    # Record the vote
-    if 'votes' not in game:
-        game['votes'] = {}
-    
-    game['votes'][user_id] = voted_id
-    voted_name = game['players'].get(voted_id, "Unknown")
-    
+    # Now we can safely answer and update outside the lock
     query.answer(f"Voted for {voted_name}")
     
     # Update vote count display
-    votes_received = len(game['votes'])
-    total_players = len(game['players'])
-    
     try:
-        # Edit the voting message to show progress
         context.bot.edit_message_text(
             text=f"🗳 *Who is the spy?*\nVotes received: {votes_received}/{total_players}",
             chat_id=chat_id,
             message_id=query.message.message_id,
-            reply_markup=query.message.reply_markup,
+            reply_markup=query.message.reply_markup if not voting_complete else None,
             parse_mode='Markdown'
         )
     except Exception as e:
-        logger.warning(f"Failed to update vote progress: {e}")
+        print(f"Failed to update vote progress: {e}")
     
-    # Check if all votes are in
-    if votes_received == total_players:
-        # Cancel voting timer since all votes are in
-        cancel_timers(chat_id)
+    # ✅ FIX: Check if all votes are in (with lock)
+    if voting_complete:
+        # Send completion message
+        try:
+            context.bot.send_message(
+                chat_id, 
+                "✅ All votes received! Calculating results...",
+                parse_mode='Markdown'
+            )
+        except:
+            pass
         
-        # Small delay to show final vote count
-        def finish_voting():
-            finish_vote(chat_id, context)
-        
-        timer = Timer(1.0, finish_voting)  # 1 second delay
-        timer.start()
-        game_state.add_timer(chat_id, timer)
+        # Small delay then finish vote
+        game_state.safe_timer_operation(
+            chat_id, 
+            "complete_voting", 
+            lambda: finish_vote(chat_id, context), 
+            1.0  # 1 second delay to show completion message
+        )
 
 def mode_callback(update: Update, context: CallbackContext):
     """Handle game mode selection"""
@@ -507,14 +538,22 @@ def mode_callback(update: Update, context: CallbackContext):
     )
 
 def finish_vote(chat_id: int, context: CallbackContext):
-    """Process voting results"""
+    """"FIXED: Always cleanup timers at start and show results properly"""
+    game_state.clear_timers(chat_id)
+
     game = game_state.get_game(chat_id)
     if not game:
         return
     
-    # Cancel any remaining timers
-    cancel_timers(chat_id)
+    # Check if voting is still active (prevent double execution)
+    if not game.get('voting_active', True):
+        # If voting already finished, don't process again
+        return
     
+    # Mark voting as finished
+    with game_state.lock:
+        game['voting_active'] = False
+
     votes = game['votes']
     if not votes:
         context.bot.send_message(chat_id, "❌ No votes received. Game aborted.")
@@ -525,13 +564,26 @@ def finish_vote(chat_id: int, context: CallbackContext):
     vote_counts = {}
     for voted_id in votes.values():
         vote_counts[voted_id] = vote_counts.get(voted_id, 0) + 1
+
+    # After counting votes
+    logger.info(f"Votes received: {votes}")
+    logger.info(f"Vote counts: {vote_counts}")
+
+    # After deciding who is voted out
+    logger.info(f"Top voted player: {chosen_name}")
     
     # Prepare vote breakdown
     breakdown = "🗳️ *Voting Results:*\n"
     for voter_id, voted_id in votes.items():
         voter_name = game['players'].get(voter_id, "Unknown")
         voted_name = game['players'].get(voted_id, "Unknown")
-        breakdown += f"- {voter_name} → {voted_name}\n"
+        breakdown += f"• {voter_name} → {voted_name}\n"
+
+    # Add vote count summary
+    breakdown += "\n📊 *Vote Count:*\n"
+    for player_id, count in vote_counts.items():
+        player_name = game['players'].get(player_id, "Unknown")
+        breakdown += f"• {player_name}: {count} vote(s)\n"
     
     # Send breakdown first
     context.bot.send_message(chat_id, breakdown, parse_mode='Markdown')
@@ -805,7 +857,7 @@ def end_game(chat_id: int, result: str, context: CallbackContext = None):
     game_state.remove_game(chat_id)
 
 def endgame(update: Update, context: CallbackContext):
-    """Manually end current game"""
+    """FIXED: Enhanced cleanup"""
     chat_id = update.message.chat_id
     user = update.effective_user
     game = game_state.get_game(chat_id)

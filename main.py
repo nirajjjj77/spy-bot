@@ -1,3 +1,5 @@
+import signal
+import sys
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters
 
 from utils.constants import TOKEN
@@ -6,7 +8,18 @@ from utils.error_handler import error_handler
 
 from handlers import core, game, anon, stats
 
+
+def signal_handler(sig, frame):
+    """Handle shutdown gracefully"""
+    print("Shutting down bot...")
+    from utils.helpers import emergency_cleanup
+    emergency_cleanup()
+    sys.exit(0)
+
 def main():
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     updater = Updater(TOKEN, use_context=True)
     dp = updater.dispatcher
 
