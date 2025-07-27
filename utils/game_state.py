@@ -2,6 +2,8 @@ import time
 from threading import Lock, Timer
 from typing import Dict, List, Optional, Tuple
 
+from utils.logger import logger
+
 class GameState:
     def __init__(self):
         self.lock = Lock()
@@ -62,8 +64,7 @@ class GameState:
                 if self.get_game(chat_id):
                     timer_func()
             except Exception as e:
-                print(f"Timer {operation_name} error: {e}")
-        
+                logger.error(f"Timer {operation_name} error: {e}", exc_info=True)
         timer = Timer(delay, wrapped_timer_func)
         timer.start()
         self.add_timer(chat_id, timer)

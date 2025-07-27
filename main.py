@@ -1,5 +1,5 @@
 import signal
-import sys
+import sys, time
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters
 
 from utils.constants import TOKEN
@@ -61,4 +61,10 @@ def main():
     updater.idle()
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except Exception as e:
+            logger.error(f"⚠️ Bot crashed: {e}", exc_info=True)
+            time.sleep(5)
+    
