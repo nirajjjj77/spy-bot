@@ -7,7 +7,7 @@ from datetime import datetime
 from threading import Timer
 
 from utils.game_state import game_state
-from utils.helpers import is_admin, format_time, get_random_location, cancel_timers, validate_input
+from utils.helpers import is_admin, format_time, get_random_location, cancel_timers, validate_input, is_authorized_to_control_game
 from utils.constants import GAME_MODES
 from utils.logger import logger
 
@@ -101,16 +101,18 @@ def leave(update: Update, context: CallbackContext):
     update.message.reply_text(f"👋 {user.first_name} left the game.")
     
     # Check if host left
-    if user.id == game['host'] and game['players']:
-        new_host = next(iter(game['players']))
-        game['host'] = new_host
-        update.message.reply_text(
-            f"👑 {game['players'][new_host]} is now the host.",
-            reply_to_message_id=update.message.message_id
-        )
-    elif not game['players']:
-        game_state.remove_game(chat_id)
-        update.message.reply_text("🛑 Game closed due to no players.")
+    if user.id == game['host']:
+        if game['players']:
+            # Pehle player ko naya host bana do
+            new_host = next(iter(game['players']))
+            game['host'] = new_host
+            update.message.reply_text(
+                f"👑 {game['players'][new_host]} is now the host."
+            )
+        else:
+            # Koi player nahi bacha -> game close
+            game_state.remove_game(chat_id)
+            update.message.reply_text("🛑 Game closed due to no players.")
 
 def players(update: Update, context: CallbackContext):
     """List current players"""
@@ -152,23 +154,9 @@ def begin(update: Update, context: CallbackContext):
         update.message.reply_text("⚠️ No game to begin.")
         return
     
-    # Permission checks
-    is_bot_admin = is_admin(user.id)
-    is_host = user.id == game['host']
-    is_group_admin = False
-    
-    try:
-        if update.effective_chat.type in ['group', 'supergroup']:
-            member = context.bot.get_chat_member(chat_id, user.id)
-            is_group_admin = member.status in ['administrator', 'creator']
-    except Exception as e:
-        logger.warning(f"Failed to check admin status: {e}")
-    
-    if not (is_host or is_bot_admin or is_group_admin):
+    if not is_authorized_to_control_game(user.id, game, context, chat_id):
         update.message.reply_text(
-            "⛔ Only game host (@{host}), bot admins, or group admins can start the game.".format(
-                host=game['players'].get(game['host'], "unknown")
-            )
+            "⛔ Only game host, bot admins, or group admins can start the game."
         )
         return
     
@@ -546,9 +534,8 @@ def finish_vote(chat_id: int, context: CallbackContext):
         return
     
     # Check if voting is still active (prevent double execution)
-    if not game.get('voting_active', True):
-        # If voting already finished, don't process again
-        return
+    if game.get('voting_active', False):
+        game['voting_active'] = False
     
     # Mark voting as finished
     with game_state.lock:
@@ -568,9 +555,6 @@ def finish_vote(chat_id: int, context: CallbackContext):
     # After counting votes
     logger.info(f"Votes received: {votes}")
     logger.info(f"Vote counts: {vote_counts}")
-
-    # After deciding who is voted out
-    logger.info(f"Top voted player: {chosen_name}")
     
     # Prepare vote breakdown
     breakdown = "🗳️ *Voting Results:*\n"
@@ -604,6 +588,9 @@ def finish_vote(chat_id: int, context: CallbackContext):
     else:
         chosen = top_voted[0]
         chosen_name = game['players'].get(chosen, "Unknown")
+    
+    # After deciding who is voted out
+    logger.info(f"Top voted player: {chosen_name}")
     
     # MISSING PART - Announce elimination result
     context.bot.send_message(
@@ -866,35 +853,13 @@ def endgame(update: Update, context: CallbackContext):
         update.message.reply_text("❌ No game to end.")
         return
 
-    # Permission checks
-    is_bot_admin = is_admin(user.id)
-    is_host = user.id == game['host']
-    is_group_admin = False
-
-     # Check Telegram group admin status (if in group)
-    try:
-        if update.effective_chat.type in ['group', 'supergroup']:
-            member = context.bot.get_chat_member(chat_id, user.id)
-            is_group_admin = member.status in ['administrator', 'creator']
-    except Exception as e:
-        logger.warning(f"Failed to check admin status: {e}")
-
-    # Reject unauthorized users
-    if not (is_host or is_bot_admin or is_group_admin):
+    if not is_authorized_to_control_game(user.id, game, context, chat_id):
         update.message.reply_text(
-            "⛔ Only game host (@{host}), bot admins, or group admins can end the game.".format(
-                host=game['players'].get(game['host'], "unknown")
-            )
+            "⛔ Only game host, bot admins, or group admins can end the game."
         )
         return
     
     # Clean up game
     game_state.remove_game(chat_id)
 
-     # Success message
-    if is_host:
-        update.message.reply_text("🛑 Game ended by host.")
-    elif is_bot_admin:
-        update.message.reply_text("🛑 Game ended by bot admin.")
-    else:
-        update.message.reply_text("🛑 Game ended by group admin.")
+    update.message.reply_text("🛑 Game ended successfully.")

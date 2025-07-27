@@ -34,13 +34,6 @@ class GameState:
             # Then remove game
             if chat_id in self.games:
                 del self.games[chat_id]
-            
-            # Clean temp messages
-            if hasattr(self, 'temp_anon_messages'):
-                self.temp_anon_messages = {
-                    k: v for k, v in self.temp_anon_messages.items() 
-                    if k.split('_')[0] != str(chat_id)
-                }
 
     def add_timer(self, chat_id: int, timer: Timer):
         """ENHANCED: Better timer tracking"""

@@ -20,13 +20,23 @@ def anon(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     current_time = time.time()
     
-    # Rate limiting with thread safety
+    COOLDOWN = 60
+
+    # Cooldown check
     with game_state.lock:
-        if user_id in game_state.anon_cooldowns:
+       if user_id in game_state.anon_cooldowns:
             time_elapsed = current_time - game_state.anon_cooldowns[user_id]
-            if time_elapsed < 60:
+            if time_elapsed < COOLDOWN:
+                # Last message yaad rakha gaya hai ya nahi
+                last_message = (
+                    game_state.anon_last_message.get(user_id, "No previous message.")
+                    if hasattr(game_state, "anon_last_message")
+                    else "No previous message."
+                )
                 update.message.reply_text(
-                    f"⏳ Please wait {60 - int(time_elapsed)} seconds before sending another anonymous message."
+                    f"⏳ Please wait {COOLDOWN - int(time_elapsed)} seconds before sending another message.\n\n"
+                    f"📝 *Your last message was:*\n_{last_message}_",
+                    parse_mode='Markdown'
                 )
                 return
     
@@ -90,6 +100,13 @@ def anon(update: Update, context: CallbackContext):
     
     # Single game
     chat_id = active_games[0][0]
+
+    with game_state.lock:
+        if not hasattr(game_state, 'anon_last_message'):
+            game_state.anon_last_message = {}
+        game_state.anon_cooldowns[user_id] = time.time()
+        game_state.anon_last_message[user_id] = message
+
     _send_anon_message(context, user_id, chat_id, message)
 
 def anon_callback(update: Update, context: CallbackContext):
