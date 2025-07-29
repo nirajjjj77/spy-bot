@@ -2,6 +2,7 @@ from telegram import Update
 from telegram.ext import CallbackContext
 from utils.constants import ADMIN_IDS
 from utils.logger import logger
+from utils.helpers import escape_markdown
 
 def error_handler(update: Update, context: CallbackContext):
     """Log errors and notify admins"""
@@ -12,7 +13,7 @@ def error_handler(update: Update, context: CallbackContext):
         try:
             context.bot.send_message(
                 chat_id=admin_id,
-                text=f"⚠️ Error occurred:\n{context.error}\n\nIn update:\n{update}",
+                text=f"⚠️ Error occurred:\n{escape_markdown(str(context.error))}\n\nIn update:\n{escape_markdown(str(update))}",
                 parse_mode='Markdown'
             )
         except Exception as e:

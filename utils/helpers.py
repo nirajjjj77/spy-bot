@@ -1,5 +1,6 @@
 import random
 import time
+import re
 from typing import Tuple, List
 
 from utils.constants import ADMIN_IDS
@@ -8,6 +9,10 @@ from utils.game_state import game_state
 from utils.constants import ERROR_MESSAGES, GAME_MODES, LOCATIONS
 
 from telegram.ext import CallbackContext
+
+def escape_markdown(text: str) -> str:
+    """Escape special Markdown characters to avoid parse errors"""
+    return re.sub(r'([_*[\]()~`>#+-=|{}.!])', r'\\\1', text)
 
 def is_admin(user_id: int) -> bool:
     """Secure admin verification"""

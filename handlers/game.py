@@ -7,7 +7,7 @@ from datetime import datetime
 from threading import Timer
 
 from utils.game_state import game_state
-from utils.helpers import is_admin, format_time, get_random_location, cancel_timers, validate_input, is_authorized_to_control_game
+from utils.helpers import is_admin, format_time, get_random_location, cancel_timers, validate_input, is_authorized_to_control_game, escape_markdown
 from utils.constants import GAME_MODES
 from utils.logger import logger
 
@@ -189,10 +189,10 @@ def begin(update: Update, context: CallbackContext):
             else:
                 context.bot.send_message(
                     uid,
-                    f"🧭 You are a civilian.\nLocation: *{game['location']}*",
+                    f"🧭 You are a civilian.\nLocation: *{escape_markdown(game['location'])}*",
                     parse_mode='Markdown'
                 )
-    
+                    
     elif mode_config['special'] == 'double_agent':
         game['spy'] = random.choice(players)
         remaining = [p for p in players if p != game['spy']]
@@ -211,7 +211,7 @@ def begin(update: Update, context: CallbackContext):
             else:
                 context.bot.send_message(
                     uid,
-                    f"🧭 You are a civilian.\nLocation: *{game['location']}*",
+                    f"🧭 You are a civilian.\nLocation: *{escape_markdown(game['location'])}*",
                     parse_mode='Markdown'
                 )
     
@@ -235,13 +235,13 @@ def begin(update: Update, context: CallbackContext):
                 fake_location = get_random_location()
                 context.bot.send_message(
                     uid,
-                    f"🧭 You are a civilian.\nLocation: *{fake_location}* ❌",
+                    f"🧭 You are a civilian.\nLocation: *{fake_location}*",
                     parse_mode='Markdown'
                 )
             else:
                 context.bot.send_message(
                     uid,
-                    f"🧭 You are a civilian.\nLocation: *{game['location']}*",
+                    f"🧭 You are a civilian.\nLocation: *{escape_markdown(game['location'])}*",
                     parse_mode='Markdown'
                 )
     
@@ -253,7 +253,7 @@ def begin(update: Update, context: CallbackContext):
             else:
                 context.bot.send_message(
                     uid,
-                    f"🧭 You are a civilian.\nLocation: *{game['location']}*",
+                    f"🧭 You are a civilian.\nLocation: *{escape_markdown(game['location'])}*",
                     parse_mode='Markdown'
                 )
 
@@ -269,17 +269,17 @@ def begin(update: Update, context: CallbackContext):
     )
     
     def start_voting_wrapper():
-        game = game_state.get_game(chat_id)
-        if game and game['state'] == 'started' and not game.get('voting_active', False):  # ✅ Check if voting not already started
-            try:
+        try:
+            game = game_state.get_game(chat_id)
+            if game and game['state'] == 'started' and not game.get('voting_active', False):  # ✅ Check if voting not already started
                 context.bot.send_message(
                     chat_id,
                     "⏰ Discussion time over! Starting voting...",
                     parse_mode='Markdown'
                 )
                 start_voting(chat_id, context)
-            except Exception as e:
-                logger.error(f"Failed to start voting automatically: {e}")
+        except Exception as e:
+            logger.error(f"Failed to start voting automatically: {e}", exc_info=True)
     
     game_state.safe_timer_operation(
         chat_id, 
@@ -326,7 +326,7 @@ def location_command(update: Update, context: CallbackContext):
     else:
         context.bot.send_message(
             user_id,
-            f"🧭 You are a civilian.\nLocation: *{game['location']}*",
+            f"🧭 You are a civilian.\nLocation: *{escape_markdown(game['location'])}*",
             parse_mode='Markdown'
         )
 
@@ -364,7 +364,7 @@ def start_voting(chat_id: int, context: CallbackContext):
     
     # Create voting buttons
     keyboard = [
-        [InlineKeyboardButton(name, callback_data=f"vote:{uid}")]
+        [InlineKeyboardButton(escape_markdown(name), callback_data=f"vote:{uid}")]
         for uid, name in game['players'].items()
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -561,7 +561,7 @@ def finish_vote(chat_id: int, context: CallbackContext):
     for voter_id, voted_id in votes.items():
         voter_name = game['players'].get(voter_id, "Unknown")
         voted_name = game['players'].get(voted_id, "Unknown")
-        breakdown += f"• {voter_name} → {voted_name}\n"
+        breakdown += f"• {escape_markdown(voter_name)} → {escape_markdown(voted_name)}\n"
 
     # Add vote count summary
     breakdown += "\n📊 *Vote Count:*\n"
@@ -595,7 +595,7 @@ def finish_vote(chat_id: int, context: CallbackContext):
     # MISSING PART - Announce elimination result
     context.bot.send_message(
         chat_id,
-        f"🎯 **{chosen_name}** was eliminated with **{vote_counts[chosen]}** vote(s)!",
+        f"🎯 *{escape_markdown(chosen_name)}* was eliminated with **{vote_counts[chosen]}** vote(s)!",
         parse_mode='Markdown'
     )
     
@@ -807,7 +807,7 @@ def handle_guess(update: Update, context: CallbackContext):
         if is_correct:
             context.bot.send_message(
                 target_chat_id,
-                f"🎉 The spy guessed correctly! Location was **{target_game['location']}**. Spy wins!",
+                f"🎉 The spy guessed correctly! Location was *{escape_markdown(target_game['location'])}*. Spy wins!",
                 parse_mode='Markdown'
             )
             update.message.reply_text("🎉 Correct guess! You win!")
