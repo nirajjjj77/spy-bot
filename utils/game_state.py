@@ -14,8 +14,14 @@ class GameState:
         self.temp_anon_messages: Dict[str, dict] = {}
 
     def get_game(self, chat_id: int) -> Optional[dict]:
-        with self.lock:
-            return self.games.get(chat_id)
+        try:
+            # Return copy to avoid concurrent modification
+            with self.lock:
+                game = self.games.get(chat_id)
+                return game.copy() if game else None
+        except Exception as e:
+            logger.error(f"Error getting game {chat_id}: {e}")
+            return None
 
     def add_game(self, chat_id: int, game_data: dict):
         with self.lock:
@@ -45,31 +51,57 @@ class GameState:
             self.active_timers[chat_id].append(timer)
 
     def clear_timers(self, chat_id: int):
-        """ENHANCED: More thorough timer cleanup"""
+        """Safe timer cleanup without locks"""
+        timers_to_clear = []
+        
+        # Get timers without lock
+        if chat_id in self.active_timers:
+            timers_to_clear = self.active_timers[chat_id][:]
+        
+        # Cancel timers outside lock
+        for timer in timers_to_clear:
+            try:
+                if timer and timer.is_alive():
+                    timer.cancel()
+            except Exception as e:
+                logger.error(f"Timer cancel error: {e}")
+        
+        # Now clear the list with lock
         with self.lock:
             if chat_id in self.active_timers:
-                for timer in self.active_timers[chat_id]:
-                    try:
-                        if timer.is_alive():  # Check if timer is still running
-                            timer.cancel()
-                    except Exception as e:
-                        print(f"Error clearing timer: {e}")
-                self.active_timers[chat_id] = []  # Clear the list
-
+                self.active_timers[chat_id] = []
+    
     def safe_timer_operation(self, chat_id: int, operation_name: str, timer_func, delay: float):
-        """NEW: Safe way to create timers with automatic cleanup"""
+        """Safe timer with better error handling"""
         def wrapped_timer_func():
             try:
-                # Check if game still exists before executing
-                if self.get_game(chat_id):
-                    timer_func()
+                game = self.get_game(chat_id)
+                if not game:
+                    return
+                    
+                # Execute timer function
+                timer_func()
+                
             except Exception as e:
-                logger.error(f"Timer {operation_name} error: {e}", exc_info=True)
-        timer = Timer(delay, wrapped_timer_func)
-        timer.start()
-        self.add_timer(chat_id, timer)
-        return timer
-
+                logger.error(f"Timer {operation_name} failed: {e}")
+                # Don't let timer errors crash the bot
+                try:
+                    from telegram.ext import CallbackContext
+                    # Create a dummy context if needed
+                    pass
+                except:
+                    pass
+        
+        try:
+            timer = Timer(delay, wrapped_timer_func)
+            timer.daemon = True  # Make timer daemon thread
+            timer.start()
+            self.add_timer(chat_id, timer)
+            return timer
+        except Exception as e:
+            logger.error(f"Failed to create timer {operation_name}: {e}")
+            return None
+    
     def cleanup_old_data(self):
         """Clean up old temporary data"""
         with self.lock:

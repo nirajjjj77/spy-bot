@@ -271,22 +271,34 @@ def begin(update: Update, context: CallbackContext):
     def start_voting_wrapper():
         try:
             game = game_state.get_game(chat_id)
-            if game and game['state'] == 'started' and not game.get('voting_active', False):  # ✅ Check if voting not already started
+            if not game or game['state'] != 'started':
+                return
+                
+            if game.get('voting_active', False):
+                return
+                
+            # Send message first
+            try:
                 context.bot.send_message(
                     chat_id,
                     "⏰ Discussion time over! Starting voting...",
                     parse_mode='Markdown'
                 )
-                start_voting(chat_id, context)
+            except Exception as msg_error:
+                logger.error(f"Failed to send voting message: {msg_error}")
+                return
+                
+            # Small delay then start voting
+            import threading
+            threading.Timer(1.0, lambda: start_voting(chat_id, context)).start()
+            
         except Exception as e:
-            logger.error(f"Failed to start voting automatically: {e}", exc_info=True)
+            logger.error(f"Timer wrapper error: {e}")
     
-    game_state.safe_timer_operation(
-        chat_id, 
-        "discussion_timer", 
-        start_voting_wrapper, 
-        discussion_time
-    )
+    # Use normal Timer instead of safe_timer_operation
+    timer = Timer(discussion_time, start_voting_wrapper)
+    timer.start()
+    game_state.add_timer(chat_id, timer)
 
 def location_command(update: Update, context: CallbackContext):
     """Send location info to player"""
@@ -347,20 +359,30 @@ def vote(update: Update, context: CallbackContext):
     start_voting(chat_id, context)
 
 def start_voting(chat_id: int, context: CallbackContext):
-    """FINAL FIX: Prevent double voting start"""
-    game = game_state.get_game(chat_id)
-    if not game or game['state'] != 'started':
-        return
-    
-    # ✅ CRITICAL FIX: Check if voting already active
-    with game_state.lock:
-        if game.get('voting_active', False):
-            return  # Voting already started, don't start again
+    """Fixed voting with proper error handling"""
+    try:
+        game = game_state.get_game(chat_id)
+        if not game or game['state'] != 'started':
+            return
         
-        # Clear any existing timers first
+        # Check voting status without lock first
+        if game.get('voting_active', False):
+            return
+        
+        # Now acquire lock for changes
+        with game_state.lock:
+            if game.get('voting_active', False):
+                return
+            
+            game['votes'] = {}
+            game['voting_active'] = True
+        
+        # Clear timers outside the lock
         game_state.clear_timers(chat_id)
-        game['votes'] = {}
-        game['voting_active'] = True
+        
+    except Exception as e:
+        logger.error(f"Error in start_voting: {e}")
+        return
     
     # Create voting buttons
     keyboard = [
@@ -406,44 +428,49 @@ def start_voting(chat_id: int, context: CallbackContext):
     game_state.safe_timer_operation(chat_id, "voting_timeout", voting_timeout, voting_time)
 
 def vote_callback(update: Update, context: CallbackContext):
-    """FIXED: Thread-safe voting with proper race condition handling"""
+    """Fixed voting without deadlock"""
     query = update.callback_query
     user_id = query.from_user.id
     chat_id = query.message.chat_id
     
-    # ✅ FIX: Get game and validate under lock
+    # Quick validation without lock first
+    game = game_state.get_game(chat_id)
+    if not game or game['state'] != 'started':
+        query.answer("Voting not active.")
+        return
+    
+    if user_id not in game['players']:
+        query.answer("You're not in this game.")
+        return
+    
+    # Parse vote target
+    try:
+        voted_id = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        query.answer("Invalid vote.")
+        return
+    
+    if voted_id not in game['players']:
+        query.answer("Invalid player.")
+        return
+    
+    # Critical section - minimize lock time
+    voting_complete = False
+    votes_received = 0
+    total_players = 0
+    voted_name = ""
+    
     with game_state.lock:
-        game = game_state.games.get(chat_id)
-        
-        if not game or game['state'] != 'started':
-            query.answer("Voting not active.")
-            return
-        
+        # Quick checks inside lock
         if not game.get('voting_active', False):
             query.answer("Voting has ended.")
             return
         
-        if user_id not in game['players']:
-            query.answer("You're not in this game.")
-            return
-        
-        # ✅ FIX: Check if already voted INSIDE the lock
         if user_id in game.get('votes', {}):
             query.answer("You already voted!")
             return
         
-        # Parse vote target
-        try:
-            voted_id = int(query.data.split(":")[1])
-        except (ValueError, IndexError):
-            query.answer("Invalid vote.")
-            return
-        
-        if voted_id not in game['players']:
-            query.answer("Invalid player.")
-            return
-        
-        # ✅ FIX: Record vote INSIDE the lock - prevents race conditions
+        # Quick write operations
         if 'votes' not in game:
             game['votes'] = {}
         
@@ -451,11 +478,13 @@ def vote_callback(update: Update, context: CallbackContext):
         voted_name = game['players'].get(voted_id, "Unknown")
         votes_received = len(game['votes'])
         total_players = len(game['players'])
-
-        # Check if voting complete
+        
+        # Check completion
         voting_complete = votes_received == total_players
         if voting_complete:
-            game['voting_active'] = False  # Stop accepting votes
+            game['voting_active'] = False
+    
+    # End of lock - now safe operations outside
     
     # Now we can safely answer and update outside the lock
     query.answer(f"Voted for {voted_name}")
@@ -527,7 +556,11 @@ def mode_callback(update: Update, context: CallbackContext):
 
 def finish_vote(chat_id: int, context: CallbackContext):
     """"FIXED: Always cleanup timers at start and show results properly"""
-    game_state.clear_timers(chat_id)
+
+    try:
+        game_state.clear_timers(chat_id)
+    except Exception as e:
+        logger.error(f"Timer cleanup error: {e}")
 
     game = game_state.get_game(chat_id)
     if not game:

@@ -110,11 +110,25 @@ def cancel_timers(chat_id: int):
     game_state.clear_timers(chat_id)
 
 def emergency_cleanup():
-    """NEW: Emergency cleanup function for bot shutdown"""
-    with game_state.lock:
-        for chat_id in list(game_state.active_timers.keys()):
-            game_state.clear_timers(chat_id)
+    """Emergency cleanup without deadlock"""
+    try:
+        # Clear timers without locks first
+        chat_ids = list(game_state.active_timers.keys())
+        for chat_id in chat_ids:
+            timers = game_state.active_timers.get(chat_id, [])
+            for timer in timers:
+                try:
+                    if timer and timer.is_alive():
+                        timer.cancel()
+                except:
+                    pass
+        
+        # Now clear data structures
         game_state.active_timers.clear()
+        game_state.games.clear()
+        
+    except Exception as e:
+        print(f"Emergency cleanup error: {e}")
 
 def send_to_all_players(context: CallbackContext, chat_id: int, message: str, exclude: List[int] = None):
     """Send message to all players in a game"""

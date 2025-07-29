@@ -19,6 +19,9 @@ def signal_handler(sig, frame):
 def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+
+    import threading
+    threading.current_thread().daemon = False
     
     updater = Updater(TOKEN, use_context=True)
     dp = updater.dispatcher
