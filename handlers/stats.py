@@ -5,7 +5,7 @@ from telegram.ext import CallbackContext
 from utils.game_state import game_state
 from utils.constants import ACHIEVEMENTS
 from utils.logger import logger
-from utils.helpers import is_admin, escace_markdown
+from utils.helpers import is_admin, escape_markdown
 
 def show_stats(update: Update, context: CallbackContext):
     """Display player statistics"""
@@ -20,7 +20,7 @@ def show_stats(update: Update, context: CallbackContext):
     spy_win_rate = (stats['spy_wins'] / stats['spy_games'] * 100) if stats['spy_games'] > 0 else 0
     civilian_win_rate = (stats['civilian_wins'] / stats['civilian_games'] * 100) if stats['civilian_games'] > 0 else 0
     
-    stats_text = f"""📊 *{escace_markdown(stats['name'])}'s Stats:*
+    stats_text = f"""📊 *{escape_markdown(stats['name'])}'s Stats:*
 
 🎮 Games Played: {stats['games_played']}
 🕵️ Spy Games: {stats['spy_games']} ({spy_win_rate:.1f}% win rate)
@@ -82,15 +82,15 @@ def show_leaderboard(update: Update, context: CallbackContext):
     
     leaderboard += "🕵️ *Top Spies (Wins):*\n"
     for i, stat in enumerate(top_spies, 1):
-        leaderboard += f"{i}. {escace_markdown(stat['name'])}: {stat['spy_wins']} wins ({stat['spy_win_rate']:.1f}%)\n"
+        leaderboard += f"{i}. {escape_markdown(stat['name'])}: {stat['spy_wins']} wins ({stat['spy_win_rate']:.1f}%)\n"
     
     leaderboard += "\n👥 *Top Civilians (Win Rate):*\n"
     for i, stat in enumerate(top_civilians, 1):
-        leaderboard += f"{i}. {escace_markdown(stat['name'])}: {stat['civilian_win_rate']:.1f}% ({stat['civilian_wins']}/{stat['civilian_games']})\n"
+        leaderboard += f"{i}. {escape_markdown(stat['name'])}: {stat['civilian_win_rate']:.1f}% ({stat['civilian_wins']}/{stat['civilian_games']})\n"
     
     leaderboard += "\n🎮 *Most Active Players:*\n"
     for i, stat in enumerate(most_active, 1):
-        leaderboard += f"{i}. {escace_markdown(stat['name'])}: {stat['games_played']} games\n"
+        leaderboard += f"{i}. {escape_markdown(stat['name'])}: {stat['games_played']} games\n"
     
     update.message.reply_text(leaderboard, parse_mode='Markdown')
 
