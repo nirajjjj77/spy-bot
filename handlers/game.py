@@ -202,11 +202,19 @@ def begin(update: Update, context: CallbackContext):
         update.message.reply_text(f"🚨 Need at least {min_players} players.")
         return
     
-    # Select location and assign roles
-    game['location'] = get_random_location()
-    game['state'] = 'started'
-    game['votes'] = {}
-    game['awaiting_guess'] = False
+    with game_state.lock:
+        current_game = game_state.games.get(chat_id)
+        if not current_game:
+            update.message.reply_text("❌ Game not found")
+            return
+    
+        # Select location and assign roles
+        current_game['location'] = get_random_location()
+        current_game['state'] = 'started'
+        current_game['votes'] = {}
+        current_game['awaiting_guess'] = False
+
+        logger.info(f"Game state updated to 'started' for {chat_id}")
     
     players = list(game['players'].keys())
     
@@ -309,7 +317,7 @@ def begin(update: Update, context: CallbackContext):
             # Quick validation
             current_game = game_state.get_game(chat_id)
             if not current_game or current_game['state'] != 'started':
-                logger.info(f"Timer cancelled - game state changed for {chat_id}")
+                logger.warning(f"Timer cancelled - game state is {current_game['state'] if current_game else 'None'}")
                 return
                 
             if current_game.get('voting_active', False):
