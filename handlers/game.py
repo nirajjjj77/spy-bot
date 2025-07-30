@@ -551,9 +551,11 @@ def vote_callback(update: Update, context: CallbackContext):
         )
 
 def mode_callback(update: Update, context: CallbackContext):
-    """Handle game mode selection"""
+    """Handle game mode selection - FIXED VERSION"""
     query = update.callback_query
     chat_id = query.message.chat_id
+    
+    # Get fresh game state
     game = game_state.get_game(chat_id)
     
     if not game or game['state'] != 'mode_select':
@@ -565,23 +567,48 @@ def mode_callback(update: Update, context: CallbackContext):
         query.answer("Invalid mode.")
         return
     
-    game['mode'] = mode_id
-    game['state'] = 'waiting'
+    # ✅ CRITICAL FIX: Update game state with lock
+    with game_state.lock:
+        current_game = game_state.games.get(chat_id)
+        if not current_game:
+            query.answer("Game not found.")
+            return
+        
+        current_game['mode'] = mode_id
+        current_game['state'] = 'waiting'
+        
+        # DEBUG: Verify update
+        print(f"=== MODE CALLBACK DEBUG ===")
+        print(f"Updated mode to: {current_game['mode']}")
+        print(f"Updated state to: {current_game['state']}")
+        print(f"=== END MODE DEBUG ===")
     
     mode_info = GAME_MODES[mode_id]
     min_players = mode_info['min_players']
     
     query.answer(f"Selected: {mode_info['name']}")
     
-    context.bot.edit_message_text(
-        text=f"✅ *{mode_info['name']} selected!*\n"
-             f"{mode_info['description']}\n"
-             f"👥 Minimum players: {min_players}\n\n"
-             f"Players, use /join to participate.",
-        chat_id=chat_id,
-        message_id=query.message.message_id,
-        parse_mode='Markdown'
-    )
+    try:
+        context.bot.edit_message_text(
+            text=f"✅ *{mode_info['name']} selected!*\n"
+                 f"{mode_info['description']}\n"
+                 f"👥 Minimum players: {min_players}\n\n"
+                 f"Players, use /join to participate.",
+            chat_id=chat_id,
+            message_id=query.message.message_id,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        print(f"Failed to edit message: {e}")
+        # Fallback: send new message
+        context.bot.send_message(
+            chat_id,
+            f"✅ *{mode_info['name']} selected!*\n"
+            f"{mode_info['description']}\n"
+            f"👥 Minimum players: {min_players}\n\n"
+            f"Players, use /join to participate.",
+            parse_mode='Markdown'
+        )
 
 def finish_vote(chat_id: int, context: CallbackContext):
     """"FIXED: Always cleanup timers at start and show results properly"""
