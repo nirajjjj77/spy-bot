@@ -37,6 +37,7 @@ def main():
     dp.add_handler(CommandHandler("vote", game.vote))
     dp.add_handler(CommandHandler("endgame", game.endgame))
     dp.add_handler(CommandHandler("location", game.location_command))
+    dp.add_handler(CommandHandler("debug", game.debug_game))
 
     dp.add_handler(CommandHandler("anon", anon.anon))
 

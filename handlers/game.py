@@ -154,6 +154,29 @@ def players(update: Update, context: CallbackContext):
         f"👥 *Players ({player_count}/{min_players}):*\n" + "\n".join(player_list) +
         (f"\n\n✅ Ready to /begin!" if player_count >= min_players else ""),
         parse_mode='Markdown'
+    )
+
+def debug_game(update: Update, context: CallbackContext):
+    """Debug game state"""
+    if not is_admin(update.effective_user.id):
+        return
+        
+    chat_id = update.message.chat_id
+    game = game_state.get_game(chat_id)
+    
+    if not game:
+        update.message.reply_text("❌ No game")
+        return
+    
+    active_timers = len(game_state.active_timers.get(chat_id, []))
+    
+    update.message.reply_text(
+        f"🔍 **Debug:**\n"
+        f"State: {game['state']}\n"
+        f"Voting: {game.get('voting_active', False)}\n"
+        f"Timers: {active_timers}\n"
+        f"Players: {len(game['players'])}",
+        parse_mode='Markdown'
     )    
 
 def begin(update: Update, context: CallbackContext):
