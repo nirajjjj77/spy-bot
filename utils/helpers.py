@@ -12,6 +12,8 @@ from telegram.ext import CallbackContext
 
 def escape_markdown(text: str) -> str:
     """Escape special Markdown characters to avoid parse errors"""
+    if not isinstance(text, str):
+        return ""
     return re.sub(r'([_*[\]()~`>#+-=|{}.!])', r'\\\1', text)
 
 def is_admin(user_id: int) -> bool:
