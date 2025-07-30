@@ -61,35 +61,18 @@ def join(update: Update, context: CallbackContext):
         update.message.reply_text("❌ No active game. Use /newgame to start one.")
         return
     
-    # DEBUG: Print game state details
-    print(f"=== JOIN DEBUG ===")
-    print(f"Game exists: {bool(game)}")
-    print(f"Game keys: {list(game.keys()) if game else 'None'}")
-    print(f"State value: '{game.get('state', 'MISSING')}'")
-    print(f"State type: {type(game.get('state'))}")
-    print(f"Mode: '{game.get('mode', 'MISSING')}'")
-    print(f"Players: {game.get('players', {})}")
-    print(f"=== END DEBUG ===")
-    
-    # Check state with proper error handling
-    current_state = game.get('state', 'unknown')
-    
-    if current_state != 'waiting':
-        update.message.reply_text(f"⛔ Game already started. Current state: {current_state}")
+    if game['state'] != 'waiting':
+        update.message.reply_text("⛔ Game already started.")
         return
     
-    if user.id in game.get('players', {}):
+    if user.id in game['players']:
         update.message.reply_text("⚠️ You already joined.")
         return
     
-    # Add player with lock
+    # Add player with proper locking
     with game_state.lock:
         current_game = game_state.games.get(chat_id)
-        if not current_game:
-            update.message.reply_text("❌ Game not found.")
-            return
-        
-        if current_game.get('state') != 'waiting':
+        if not current_game or current_game['state'] != 'waiting':
             update.message.reply_text("❌ Game state changed. Try again.")
             return
         
@@ -99,8 +82,8 @@ def join(update: Update, context: CallbackContext):
     
     # Update player count
     updated_game = game_state.get_game(chat_id)
-    player_count = len(updated_game.get('players', {}))
-    min_players = GAME_MODES.get(updated_game.get('mode', 'normal'), {}).get('min_players', 3)
+    player_count = len(updated_game['players'])
+    min_players = GAME_MODES.get(updated_game['mode'], {}).get('min_players', 3)
     
     if player_count >= min_players:
         update.message.reply_text(
@@ -576,12 +559,6 @@ def mode_callback(update: Update, context: CallbackContext):
         
         current_game['mode'] = mode_id
         current_game['state'] = 'waiting'
-        
-        # DEBUG: Verify update
-        print(f"=== MODE CALLBACK DEBUG ===")
-        print(f"Updated mode to: {current_game['mode']}")
-        print(f"Updated state to: {current_game['state']}")
-        print(f"=== END MODE DEBUG ===")
     
     mode_info = GAME_MODES[mode_id]
     min_players = mode_info['min_players']
