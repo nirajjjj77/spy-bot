@@ -53,25 +53,40 @@ def join(update: Update, context: CallbackContext):
     """Join current game"""
     chat_id = update.message.chat_id
     user = update.effective_user
+
     game = game_state.get_game(chat_id)
     
     if not game:
         update.message.reply_text("❌ No active game. Use /newgame to start one.")
         return
     
+    # ✅ DEBUG: Add detailed logging
+    print(f"DEBUG: Game state = '{game.get('state', 'MISSING')}'")
+    print(f"DEBUG: Game mode = '{game.get('mode', 'MISSING')}'")
+    print(f"DEBUG: Current players = {list(game.get('players', {}).keys())}")
+    print(f"DEBUG: Full game data = {game}")  # Remove after testing
+    
     if game['state'] != 'waiting':
-        update.message.reply_text("⛔ Game already started.")
+        update.message.reply_text("⛔ Game already started. Current state: {game['state']}")
         return
     
     if user.id in game['players']:
         update.message.reply_text("⚠️ You already joined.")
         return
     
-    game['players'][user.id] = user.first_name
+    # ✅ CRITICAL FIX: Update game state properly
+    with game_state.lock:
+        current_game = game_state.games.get(chat_id)
+        if not current_game or current_game['state'] != 'waiting':
+            update.message.reply_text("❌ Game state changed. Try again.")
+            return
+        
+        current_game['players'][user.id] = user.first_name
+    
     update.message.reply_text(f"✅ {user.first_name} joined the game!")
     
     # Update player count
-    player_count = len(game['players'])
+    player_count = len(game['players']) + 1
     min_players = GAME_MODES.get(game.get('mode', 'normal'), {}).get('min_players', 3)
     if player_count >= min_players:
         update.message.reply_text(
