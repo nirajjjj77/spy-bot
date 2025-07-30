@@ -280,35 +280,49 @@ def begin(update: Update, context: CallbackContext):
         parse_mode='Markdown'
     )
     
-    def start_voting_wrapper():
+    def voting_timer_callback():
+        """Direct voting timer callback - NO NESTED TIMERS"""
         try:
-            game = game_state.get_game(chat_id)
-            if not game or game['state'] != 'started':
+            # Quick validation
+            current_game = game_state.get_game(chat_id)
+            if not current_game or current_game['state'] != 'started':
+                logger.info(f"Timer cancelled - game state changed for {chat_id}")
                 return
                 
-            if game.get('voting_active', False):
+            if current_game.get('voting_active', False):
+                logger.info(f"Timer cancelled - voting already active for {chat_id}")
                 return
-                
-            # Send message first
+            
+            # Send notification
             try:
                 context.bot.send_message(
                     chat_id,
                     "⏰ Discussion time over! Starting voting...",
                     parse_mode='Markdown'
                 )
-            except Exception as msg_error:
-                logger.error(f"Failed to send voting message: {msg_error}")
-                return
-                
-            # Small delay then start voting
-            import threading
-            threading.Timer(1.0, lambda: start_voting(chat_id, context)).start()
+            except Exception as e:
+                logger.error(f"Failed to send voting notification: {e}")
+                # Continue anyway - try to start voting
+            
+            # Start voting directly (no delay needed)
+            start_voting(chat_id, context)
             
         except Exception as e:
-            logger.error(f"Timer wrapper error: {e}")
+            logger.error(f"Voting timer callback failed for {chat_id}: {e}")
+            # Emergency fallback - try one more time
+            try:
+                if game_state.get_game(chat_id):
+                    context.bot.send_message(
+                        chat_id, 
+                        "⚠️ Timer error occurred. Use /vote to start voting manually.",
+                        parse_mode='Markdown'
+                    )
+            except:
+                pass
     
-    # Use normal Timer instead of safe_timer_operation
-    timer = Timer(discussion_time, start_voting_wrapper)
+    # Create and start timer
+    timer = Timer(discussion_time, voting_timer_callback)
+    timer.daemon = True  # Important: Make it daemon thread
     timer.start()
     game_state.add_timer(chat_id, timer)
 
