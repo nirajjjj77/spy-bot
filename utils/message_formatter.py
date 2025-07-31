@@ -125,8 +125,6 @@ class MessageFormatter:
             f"• Don't be too quiet or too talkative\n"
             f"• Try to redirect suspicion to others\n\n"
             f"🏆 <b>You win if:</b> You survive the vote!\n\n"
-            f"⚠️ The location is: <tg-spoiler>{location}</tg-spoiler>\n"
-            f"(This is just for reference - you shouldn't know this!)"
         )
     
     def get_civilian_role_message(self, location: str) -> str:
