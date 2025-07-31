@@ -345,18 +345,33 @@ class GameHandlers:
         """Handle vote button press."""
         data_parts = query.data.split('_')
         if len(data_parts) != 3:
+            await query.answer("❌ Invalid vote data!")
             return
         
         voted_for_id = int(data_parts[1])
         game_id = data_parts[2]
+
+        # Check if game exists and is in voting phase
+        game = self.game_logic.get_game_info(game_id)
+        if not game or game['status'] != 'voting':
+            await query.answer("❌ Voting is not active!")
+            return
+        
+        # Check if user is in the game
+        if not any(p['user_id'] == user.id for p in game['players']):
+            await query.answer("❌ You're not in this game!")
+            return
+    
+        # Check if user already voted
+        if str(user.id) in game.get('votes', {}):
+            await query.answer("❌ You have already voted!")
+            return
         
         # Cast vote
         success = self.game_logic.cast_vote(game_id, user.id, voted_for_id)
         
         if not success:
-            await query.message.reply_text(
-                f"❌ {user.first_name}, couldn't cast your vote!"
-            )
+            await query.answer("❌ Couldn't cast your vote!")
             return
         
         # Get voted player name
@@ -368,10 +383,14 @@ class GameHandlers:
         
         voted_name = voted_player['first_name'] if voted_player else "Unknown"
         
-        await query.message.reply_text(
-            f"✅ {user.first_name} voted for {voted_name}!"
-        )
+        await query.answer(f"✅ You voted for {voted_name}!")
         
+        # Send confirmation message to the chat
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"✅ {user.first_name} voted for {voted_name}!"
+        )
+
         # Check if all players have voted
         if self.game_logic.check_all_voted(game_id):
             # Cancel voting timer
