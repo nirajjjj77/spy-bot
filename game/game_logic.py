@@ -32,6 +32,7 @@ class GameLogic:
         # Check if there's already an active game
         existing_game = self.db.get_active_game_by_chat(chat_id)
         if existing_game:
+            logger.warning(f"Active game already exists in chat {chat_id}")
             return None
         
         game_id = f"spy_{chat_id}_{int(time.time())}"
@@ -47,28 +48,52 @@ class GameLogic:
                 'discussion_end_time': None,
                 'voting_end_time': None
             }
+            logger.info(f"Created new game {game_id} in chat {chat_id}")
             return game_id
         
         return None
     
     def join_game(self, game_id: str, user_id: int, username: str, first_name: str, last_name: str = None) -> bool:
         """Add player to game."""
+        # Get fresh game data from database
         game = self.db.get_game(game_id)
-        if not game or game['status'] != 'waiting':
+        if not game:
+            logger.error(f"Game {game_id} not found when player {user_id} tried to join")
+            return False
+        
+        if game['status'] != 'waiting':
+            logger.warning(f"Game {game_id} status is {game['status']}, cannot join")
             return False
         
         # Check if player already joined
         if any(p['user_id'] == user_id for p in game['players']):
+            logger.warning(f"Player {user_id} already in game {game_id}")
             return False
         
         # Maximum 8 players
         if len(game['players']) >= 8:
+            logger.warning(f"Game {game_id} is full (8 players)")
             return False
         
-        return self.db.add_player_to_game(game_id, user_id, username, first_name, last_name)
+        # Add to database
+        success = self.db.add_player_to_game(game_id, user_id, username, first_name, last_name)
+        
+        if success:
+            # Update local tracking with fresh data from database
+            updated_game = self.db.get_game(game_id)
+            if updated_game and game_id in self.active_games:
+                self.active_games[game_id]['players'] = updated_game['players']
+                logger.info(f"Player {user_id} ({first_name}) joined game {game_id}. Total players: {len(updated_game['players'])}")
+            else:
+                logger.error(f"Failed to update local tracking for game {game_id}")
+        else:
+            logger.error(f"Failed to add player {user_id} to game {game_id}")
+        
+        return success
     
     def can_start_game(self, game_id: str) -> Tuple[bool, str]:
         """Check if game can be started."""
+        # Always get fresh data from database for this check
         game = self.db.get_game(game_id)
         if not game:
             return False, "Game not found"
@@ -77,18 +102,21 @@ class GameLogic:
             return False, "Game already started or ended"
         
         if len(game['players']) < 3:
-            return False, "Need at least 3 players to start"
+            return False, f"Need at least 3 players to start (currently {len(game['players'])})"
         
         return True, "Game can be started"
     
     def start_game(self, game_id: str) -> Optional[Dict]:
         """Start the game - assign spy and location."""
+        # Get fresh game data from database
         game = self.db.get_game(game_id)
         if not game:
+            logger.error(f"Game {game_id} not found when trying to start")
             return None
         
         can_start, message = self.can_start_game(game_id)
         if not can_start:
+            logger.warning(f"Cannot start game {game_id}: {message}")
             return None
         
         # Select random spy and location
@@ -109,6 +137,8 @@ class GameLogic:
                 'voting_end_time': None
             }
             
+            logger.info(f"Started game {game_id} with {len(game['players'])} players. Spy: {spy['user_id']}, Location: {location}")
+            
             return {
                 'game_id': game_id,
                 'spy_id': spy['user_id'],
@@ -116,58 +146,88 @@ class GameLogic:
                 'players': game['players']
             }
         
+        logger.error(f"Failed to start game {game_id} in database")
         return None
     
     def get_game_info(self, game_id: str) -> Optional[Dict]:
         """Get current game information."""
+        # Always get fresh data from database for consistency
+        game = self.db.get_game(game_id)
+        if game:
+            # Update local tracking if it exists
+            if game_id in self.active_games:
+                self.active_games[game_id].update({
+                    'players': game['players'],
+                    'status': game['status'],
+                    'votes': game['votes']
+                })
+            return game
+        
+        # Fallback to local tracking if database fails
         if game_id in self.active_games:
             return self.active_games[game_id].copy()
         
-        # Fallback to database
-        return self.db.get_game(game_id)
+        return None
     
     def get_active_game_by_chat(self, chat_id: int) -> Optional[Dict]:
         """Get active game in chat."""
-        # Check local tracking first
+        # Always check database first for most current data
+        game = self.db.get_active_game_by_chat(chat_id)
+        if game:
+            # Update local tracking if game exists
+            game_id = game['game_id']
+            if game_id in self.active_games:
+                self.active_games[game_id].update({
+                    'players': game['players'],
+                    'status': game['status'],
+                    'votes': game['votes']
+                })
+            return game
+        
+        # Fallback to local tracking
         for game_id, game_data in self.active_games.items():
             if game_data['chat_id'] == chat_id and game_data['status'] in ['waiting', 'discussion', 'voting']:
                 return {**game_data, 'game_id': game_id}
         
-        # Fallback to database
-        return self.db.get_active_game_by_chat(chat_id)
+        return None
     
     def start_voting_phase(self, game_id: str) -> bool:
         """Start voting phase."""
-        if game_id not in self.active_games:
-            return False
-        
         if self.db.start_voting(game_id):
-            self.active_games[game_id]['status'] = 'voting'
-            self.active_games[game_id]['voting_end_time'] = datetime.now() + timedelta(seconds=30)
+            if game_id in self.active_games:
+                self.active_games[game_id]['status'] = 'voting'
+                self.active_games[game_id]['voting_end_time'] = datetime.now() + timedelta(seconds=30)
+            logger.info(f"Started voting phase for game {game_id}")
             return True
         
+        logger.error(f"Failed to start voting phase for game {game_id}")
         return False
     
     def cast_vote(self, game_id: str, voter_id: int, voted_for_id: int) -> bool:
         """Cast a vote."""
         game = self.get_game_info(game_id)
         if not game or game['status'] != 'voting':
+            logger.warning(f"Cannot cast vote in game {game_id}: game not found or not in voting phase")
             return False
         
         # Check if voter is in game
         if not any(p['user_id'] == voter_id for p in game['players']):
+            logger.warning(f"Voter {voter_id} not in game {game_id}")
             return False
         
         # Check if voted player is in game
         if not any(p['user_id'] == voted_for_id for p in game['players']):
+            logger.warning(f"Voted player {voted_for_id} not in game {game_id}")
             return False
         
         if self.db.cast_vote(game_id, voter_id, voted_for_id):
             # Update local tracking
             if game_id in self.active_games:
                 self.active_games[game_id]['votes'][str(voter_id)] = voted_for_id
+            logger.info(f"Player {voter_id} voted for {voted_for_id} in game {game_id}")
             return True
         
+        logger.error(f"Failed to cast vote in database for game {game_id}")
         return False
     
     def check_all_voted(self, game_id: str) -> bool:
@@ -179,12 +239,14 @@ class GameLogic:
         total_players = len(game['players'])
         votes_cast = len(game['votes'])
         
+        logger.debug(f"Game {game_id}: {votes_cast}/{total_players} votes cast")
         return votes_cast >= total_players
     
     def calculate_results(self, game_id: str) -> Optional[Dict]:
         """Calculate voting results and determine winner."""
         game = self.get_game_info(game_id)
         if not game:
+            logger.error(f"Game {game_id} not found when calculating results")
             return None
         
         votes = game['votes']
@@ -195,6 +257,7 @@ class GameLogic:
             winner = 'spy'
             eliminated_player_id = None
             vote_counts = {}
+            logger.info(f"Game {game_id}: No votes cast, spy wins by default")
         else:
             # Count votes
             vote_counts = Counter(votes.values())
@@ -205,8 +268,10 @@ class GameLogic:
             # Determine winner
             if eliminated_player_id == spy_id:
                 winner = 'civilians'
+                logger.info(f"Game {game_id}: Spy eliminated, civilians win")
             else:
                 winner = 'spy'
+                logger.info(f"Game {game_id}: Civilian eliminated, spy wins")
         
         # End game in database
         self.db.end_game(game_id, winner)
@@ -254,8 +319,10 @@ class GameLogic:
                 self.voting_tasks[game_id].cancel()
                 del self.voting_tasks[game_id]
             
+            logger.info(f"Cancelled game {game_id}")
             return True
         
+        logger.error(f"Failed to cancel game {game_id}")
         return False
     
     def cleanup_game(self, game_id: str):
@@ -268,6 +335,8 @@ class GameLogic:
         
         if game_id in self.voting_tasks:
             del self.voting_tasks[game_id]
+        
+        logger.info(f"Cleaned up game {game_id}")
     
     def get_player_role_info(self, game_id: str, user_id: int) -> Optional[Dict]:
         """Get role-specific information for a player."""

@@ -97,6 +97,7 @@ class DatabaseManager:
             ''', (game_id, chat_id))
             
             conn.commit()
+            logger.info(f"Game {game_id} created successfully")
             return True
             
         except Exception as e:
@@ -114,34 +115,60 @@ class DatabaseManager:
         try:
             # First, ensure player exists in players table
             cursor.execute('''
-                INSERT OR REPLACE INTO players 
-                (user_id, username, first_name, last_name, last_played)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT OR IGNORE INTO players 
+                (user_id, username, first_name, last_name, 
+                 games_played, games_won, spy_games, spy_wins, 
+                 civilian_games, civilian_wins, total_votes_cast, correct_votes, last_played)
+                VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, CURRENT_TIMESTAMP)
             ''', (user_id, username, first_name, last_name))
+            
+            # Update player info if they already exist
+            cursor.execute('''
+                UPDATE players 
+                SET username = ?, first_name = ?, last_name = ?, last_played = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            ''', (username, first_name, last_name, user_id))
             
             # Get current players in game
             cursor.execute('SELECT players FROM games WHERE game_id = ?', (game_id,))
             result = cursor.fetchone()
             
-            if result:
-                players = json.loads(result[0])
-                if user_id not in [p['user_id'] for p in players]:
-                    players.append({
-                        'user_id': user_id,
-                        'username': username,
-                        'first_name': first_name,
-                        'last_name': last_name
-                    })
-                    
-                    # Update game with new players list
-                    cursor.execute('''
-                        UPDATE games SET players = ? WHERE game_id = ?
-                    ''', (json.dumps(players), game_id))
-                    
-                    conn.commit()
-                    return True
+            if not result:
+                logger.error(f"Game {game_id} not found when adding player")
+                return False
             
-            return False
+            players = json.loads(result[0])
+            
+            # Check if player already in game
+            if any(p['user_id'] == user_id for p in players):
+                logger.warning(f"Player {user_id} already in game {game_id}")
+                return False
+            
+            # Check max players
+            if len(players) >= 8:
+                logger.warning(f"Game {game_id} is full (8 players)")
+                return False
+            
+            # Add player to list
+            players.append({
+                'user_id': user_id,
+                'username': username,
+                'first_name': first_name,
+                'last_name': last_name
+            })
+            
+            # Update game with new players list
+            cursor.execute('''
+                UPDATE games SET players = ? WHERE game_id = ?
+            ''', (json.dumps(players), game_id))
+            
+            if cursor.rowcount == 0:
+                logger.error(f"Failed to update game {game_id} with new player")
+                return False
+            
+            conn.commit()
+            logger.info(f"Player {user_id} ({first_name}) added to game {game_id}. Total players: {len(players)}")
+            return True
             
         except Exception as e:
             logger.error(f"Error adding player to game: {e}")
@@ -201,7 +228,7 @@ class DatabaseManager:
             
             result = cursor.fetchone()
             if result:
-                return {
+                game_data = {
                     'game_id': result[0],
                     'chat_id': result[1],
                     'status': result[2],
@@ -213,6 +240,10 @@ class DatabaseManager:
                     'voting_end': result[8],
                     'winner': result[9]
                 }
+                logger.debug(f"Retrieved game {game_id}: {len(game_data['players'])} players")
+                return game_data
+            
+            logger.warning(f"Game {game_id} not found")
             return None
             
         except Exception as e:
@@ -237,7 +268,7 @@ class DatabaseManager:
             
             result = cursor.fetchone()
             if result:
-                return {
+                game_data = {
                     'game_id': result[0],
                     'chat_id': result[1],
                     'status': result[2],
@@ -249,6 +280,10 @@ class DatabaseManager:
                     'voting_end': result[8],
                     'winner': result[9]
                 }
+                logger.debug(f"Retrieved active game for chat {chat_id}: {game_data['game_id']} with {len(game_data['players'])} players")
+                return game_data
+            
+            logger.debug(f"No active game found for chat {chat_id}")
             return None
             
         except Exception as e:
