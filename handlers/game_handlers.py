@@ -350,7 +350,7 @@ class GameHandlers:
         
         voted_for_id = int(data_parts[1])
         game_id = data_parts[2]
-
+    
         # Check if game exists and is in voting phase
         game = self.game_logic.get_game_info(game_id)
         if not game or game['status'] != 'voting':
@@ -362,8 +362,9 @@ class GameHandlers:
             await query.answer("❌ You're not in this game!")
             return
     
-        # Check if user already voted
-        if str(user.id) in game.get('votes', {}):
+        # Check if user already voted - FIX: Use correct key name
+        votes = game.get('votes', {})
+        if str(user.id) in votes:
             await query.answer("❌ You have already voted!")
             return
         
@@ -374,10 +375,10 @@ class GameHandlers:
             await query.answer("❌ Couldn't cast your vote!")
             return
         
-        # Get voted player name
-        game = self.game_logic.get_game_info(game_id)
+        # Get voted player name - Get fresh game data after vote
+        updated_game = self.game_logic.get_game_info(game_id)
         voted_player = next(
-            (p for p in game['players'] if p['user_id'] == voted_for_id), 
+            (p for p in updated_game['players'] if p['user_id'] == voted_for_id), 
             None
         )
         
@@ -391,7 +392,7 @@ class GameHandlers:
             text=f"✅ {user.first_name} voted for {voted_name}!"
         )
 
-        # Check if all players have voted
+        # Check if all players have voted - use fresh game data
         if self.game_logic.check_all_voted(game_id):
             # Cancel voting timer
             if game_id in self.voting_timers:

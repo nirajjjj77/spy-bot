@@ -205,28 +205,39 @@ class GameLogic:
     
     def cast_vote(self, game_id: str, voter_id: int, voted_for_id: int) -> bool:
         """Cast a vote."""
-        game = self.get_game_info(game_id)
+        # Get fresh game data from database
+        game = self.db.get_game(game_id)
         if not game or game['status'] != 'voting':
-            logger.warning(f"Cannot cast vote in game {game_id}: game not found or not in voting phase")
+            logger.warning(f"Cannot cast vote in game {game_id}: game not found or not in voting phase (status: {game.get('status') if game else 'None'})")
             return False
-        
+
         # Check if voter is in game
         if not any(p['user_id'] == voter_id for p in game['players']):
             logger.warning(f"Voter {voter_id} not in game {game_id}")
             return False
-        
+
         # Check if voted player is in game
         if not any(p['user_id'] == voted_for_id for p in game['players']):
             logger.warning(f"Voted player {voted_for_id} not in game {game_id}")
             return False
-        
+
+        # Check if user already voted
+        current_votes = game.get('votes', {})
+        if str(voter_id) in current_votes:
+            logger.warning(f"Player {voter_id} already voted in game {game_id}")
+            return False
+
+        # Cast vote in database
         if self.db.cast_vote(game_id, voter_id, voted_for_id):
             # Update local tracking
             if game_id in self.active_games:
+                if 'votes' not in self.active_games[game_id]:
+                    self.active_games[game_id]['votes'] = {}
                 self.active_games[game_id]['votes'][str(voter_id)] = voted_for_id
+            
             logger.info(f"Player {voter_id} voted for {voted_for_id} in game {game_id}")
             return True
-        
+
         logger.error(f"Failed to cast vote in database for game {game_id}")
         return False
     
