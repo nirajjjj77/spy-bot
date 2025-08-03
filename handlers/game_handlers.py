@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import json
 from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackContext
 
@@ -221,22 +223,160 @@ class GameHandlers:
         if not success:
             return
         
-        # Get voting keyboard
-        players_data = self.game_logic.get_voting_keyboard_data(game_id)
-        keyboard = self.keyboard_builder.get_voting_keyboard(players_data, game_id)
-        
-        message = self.formatter.get_voting_started_message()
+        message = self.formatter.get_voting_started_message_private()
         
         await context.bot.send_message(
             chat_id=chat_id,
             text=message,
-            reply_markup=keyboard,
             parse_mode='HTML'
         )
+
+        # Send private voting messages
+        await self.send_private_voting_messages(context, game_id)
         
         # Start voting timer
         await self.start_voting_timer(context, game_id, chat_id)
-    
+
+    async def send_private_voting_messages(self, context: CallbackContext, game_id: str):
+        """Send private voting messages to all players."""
+        game = self.game_logic.get_game_info(game_id)
+        if not game:
+            return
+        
+        players = game['players']
+        
+        for player in players:
+            user_id = player['user_id']
+            
+            try:
+                # Create numbered player list
+                player_list = ""
+                for i, p in enumerate(players, 1):
+                    name = p['first_name']
+                    username = f"@{p['username']}" if p['username'] else ""
+                    player_list += f"{i}. {name} {username}\n"
+                
+                message = (
+                    f"🗳️ <b>VOTING TIME!</b>\n"
+                    f"Who do you think is the SPY?\n\n"
+                    f"{player_list}\n"
+                    f"Reply with: <code>/vote 3</code>\n"
+                    f"(to vote for player #3)\n\n"
+                    f"⏰ Time left: 30 seconds"
+                )
+                
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message,
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                logger.error(f"Failed to send voting message to user {user_id}: {e}")
+
+    async def handle_vote_command(self, update: Update, context: CallbackContext):
+        """Handle /vote command in private chat."""
+        user_id = update.effective_user.id
+        chat_type = update.effective_chat.type
+        
+        # Only allow in private chat
+        if chat_type != 'private':
+            await update.message.reply_text("❌ Voting must be done in private chat with the bot!")
+            return
+        
+        # Check if user provided vote number
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Please specify who to vote for!\n"
+                "Example: /vote 3"
+            )
+            return
+        
+        try:
+            vote_number = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ Please use a number! Example: /vote 3")
+            return
+        
+        # Find active game for this user
+        active_game = self.find_user_active_game(user_id)
+        if not active_game:
+            await update.message.reply_text("❌ You're not in any active voting!")
+            return
+        
+        game_id = active_game['game_id']
+        game = self.game_logic.get_game_info(game_id)
+        
+        if not game or game['status'] != 'voting':
+            await update.message.reply_text("❌ No active voting found!")
+            return
+        
+        # Validate vote number
+        if vote_number < 1 or vote_number > len(game['players']):
+            await update.message.reply_text(f"❌ Please vote between 1-{len(game['players'])}!")
+            return
+        
+        # Get voted player ID
+        voted_player = game['players'][vote_number - 1]
+        voted_for_id = voted_player['user_id']
+        voted_name = voted_player['first_name']
+        
+        # Check if already voted
+        votes = game.get('votes', {})
+        if str(user_id) in votes:
+            await update.message.reply_text("❌ You have already voted!")
+            return
+        
+        # Cast vote
+        success = self.game_logic.cast_vote(game_id, user_id, voted_for_id)
+        
+        if success:
+            await update.message.reply_text(f"✅ You voted for {voted_name}!")
+            
+            # Notify group chat
+            await context.bot.send_message(
+                chat_id=active_game['chat_id'],
+                text=f"✅ {update.effective_user.first_name} has voted!"
+            )
+            
+            # Check if all voted
+            if self.game_logic.check_all_voted(game_id):
+                # Cancel voting timer
+                if game_id in self.voting_timers:
+                    self.voting_timers[game_id].cancel()
+                
+                # End voting immediately
+                await self.end_voting_phase(context, game_id, active_game['chat_id'])
+        else:
+            await update.message.reply_text("❌ Failed to cast vote! Try again.")
+
+    def find_user_active_game(self, user_id: int) -> Optional[Dict]:
+        """Find active game where user is participating."""
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                SELECT g.game_id, g.chat_id, g.status, g.players
+                FROM games g
+                WHERE g.status IN ('discussion', 'voting')
+                AND json_extract(g.players, '$') LIKE '%"user_id": ' || ? || '%'
+            ''', (user_id,))
+            
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'game_id': result[0],
+                    'chat_id': result[1],
+                    'status': result[2],
+                    'players': json.loads(result[3])
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Error finding user's active game: {e}")
+            return None
+        finally:
+            conn.close()
+        
     async def start_voting_timer(self, context: CallbackContext, game_id: str, chat_id: int):
         """Start voting phase timer."""
         # Cancel existing timer if any
@@ -288,7 +428,7 @@ class GameHandlers:
             del self.voting_timers[game_id]
     
     async def button_callback(self, update: Update, context: CallbackContext):
-        """Handle inline keyboard button presses."""
+        """Handle inline keyboard button presses - only for join game."""
         query = update.callback_query
         await query.answer()
         
@@ -297,8 +437,6 @@ class GameHandlers:
         
         if data.startswith('join_game'):
             await self.handle_join_button(query, user)
-        elif data.startswith('vote_'):
-            await self.handle_vote_button(query, user, context)
     
     async def handle_join_button(self, query, user):
         """Handle join game button press."""
@@ -340,66 +478,6 @@ class GameHandlers:
                 f"❌ {user.first_name}, you couldn't join the game!\n"
                 "You might already be in the game or it's full."
             )
-    
-    async def handle_vote_button(self, query, user, context: CallbackContext):
-        """Handle vote button press."""
-        data_parts = query.data.split('_')
-        if len(data_parts) != 3:
-            await query.answer("❌ Invalid vote data!")
-            return
-        
-        voted_for_id = int(data_parts[1])
-        game_id = data_parts[2]
-    
-        # Check if game exists and is in voting phase
-        game = self.game_logic.get_game_info(game_id)
-        if not game or game['status'] != 'voting':
-            await query.answer("❌ Voting is not active!")
-            return
-        
-        # Check if user is in the game
-        if not any(p['user_id'] == user.id for p in game['players']):
-            await query.answer("❌ You're not in this game!")
-            return
-    
-        # Check if user already voted - FIX: Use correct key name
-        votes = game.get('votes', {})
-        if str(user.id) in votes:
-            await query.answer("❌ You have already voted!")
-            return
-        
-        # Cast vote
-        success = self.game_logic.cast_vote(game_id, user.id, voted_for_id)
-        
-        if not success:
-            await query.answer("❌ Couldn't cast your vote!")
-            return
-        
-        # Get voted player name - Get fresh game data after vote
-        updated_game = self.game_logic.get_game_info(game_id)
-        voted_player = next(
-            (p for p in updated_game['players'] if p['user_id'] == voted_for_id), 
-            None
-        )
-        
-        voted_name = voted_player['first_name'] if voted_player else "Unknown"
-        
-        await query.answer(f"✅ You voted for {voted_name}!")
-        
-        # Send confirmation message to the chat
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=f"✅ {user.first_name} voted for {voted_name}!"
-        )
-
-        # Check if all players have voted - use fresh game data
-        if self.game_logic.check_all_voted(game_id):
-            # Cancel voting timer
-            if game_id in self.voting_timers:
-                self.voting_timers[game_id].cancel()
-            
-            # End voting immediately
-            await self.end_voting_phase(context, game_id, query.message.chat_id)
     
     async def show_players(self, update: Update, context: CallbackContext):
         """Show current players in the game."""

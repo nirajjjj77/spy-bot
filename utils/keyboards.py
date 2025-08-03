@@ -12,35 +12,6 @@ class KeyboardBuilder:
         ]
         return InlineKeyboardMarkup(keyboard)
     
-    def get_voting_keyboard(self, players_data: List[Dict], game_id: str) -> InlineKeyboardMarkup:
-        """Get voting keyboard with all players."""
-        keyboard = []
-        
-        # Create buttons for each player (2 per row)
-        for i in range(0, len(players_data), 2):
-            row = []
-            
-            # First player in row
-            player1 = players_data[i]
-            button1 = InlineKeyboardButton(
-                f"🗳️ {player1['display_name']}", 
-                callback_data=f"vote_{player1['user_id']}_{game_id}"
-            )
-            row.append(button1)
-            
-            # Second player in row (if exists)
-            if i + 1 < len(players_data):
-                player2 = players_data[i + 1]
-                button2 = InlineKeyboardButton(
-                    f"🗳️ {player2['display_name']}", 
-                    callback_data=f"vote_{player2['user_id']}_{game_id}"
-                )
-                row.append(button2)
-            
-            keyboard.append(row)
-        
-        return InlineKeyboardMarkup(keyboard)
-    
     def get_admin_keyboard(self) -> InlineKeyboardMarkup:
         """Get admin panel keyboard."""
         keyboard = [

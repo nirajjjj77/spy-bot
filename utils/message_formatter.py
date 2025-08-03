@@ -144,17 +144,19 @@ class MessageFormatter:
             f"🏆 <b>You win if:</b> The spy gets voted out!"
         )
     
-    def get_voting_started_message(self) -> str:
+    def get_voting_started_message_private(self) -> str:
         """Get voting phase started message."""
         return (
             f"{self.emojis['voting']} <b>Voting Phase Started!</b>\n\n"
             f"{self.emojis['time']} Time limit: 30 seconds\n"
-            f"🗳️ Vote for who you think is the SPY!\n\n"
+            f"🔒 <b>Private voting enabled!</b>\n\n"
+            f"📱 <b>Check your private messages with the bot to vote!</b>\n"
+            f"Use /vote <number> in your DM with the bot\n\n"
             f"⚠️ <b>Important:</b>\n"
+            f"• Vote privately to keep it secret\n"
             f"• You must vote within 30 seconds\n"
-            f"• Player with most votes gets eliminated\n"
-            f"• If all players vote early, voting ends immediately\n\n"
-            f"Choose wisely! 👇"
+            f"• Player with most votes gets eliminated\n\n"
+            f"🤐 Vote wisely - your vote is secret!"
         )
     
     def get_results_message(self, results: Dict) -> str:

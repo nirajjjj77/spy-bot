@@ -70,6 +70,7 @@ def main():
         application.add_handler(CommandHandler("leaderboard", game_handlers.show_leaderboard))
         application.add_handler(CommandHandler("stats", game_handlers.show_stats))
         application.add_handler(CommandHandler("cancel", game_handlers.cancel_game))
+        application.add_handler(CommandHandler("vote", game_handlers.handle_vote_command))
         
         # Admin commands
         application.add_handler(CommandHandler("admin", admin_handlers.admin_panel))
